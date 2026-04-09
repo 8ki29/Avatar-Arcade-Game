@@ -96,3 +96,36 @@ cd D:\Documentos\Python Projects\Avatar-Arcade-Game\tools
 You can edit defaults at the top of the script (`$OpenPoseRoot`, `$ProjectRoot`, person/session/video/duration/countdown) to match your machine and preferred settings.
 
 > Note: the raw captured clip can still be longer than the final model input window used downstream. This helper only standardizes capture-time duration.
+
+
+## Guided full-cycle helper (PowerShell)
+
+Use `record_gesture_cycle.ps1` when you want to capture one full 8-gesture cycle for the same person/session in one guided run.
+
+What it does:
+
+- prompts once for person/session/video/duration
+- auto-assigns the next `take_###` label by scanning existing takes across all 8 gestures for that person/session
+- walks you through the fixed gesture order below
+- waits for ENTER before each capture (or `q` to quit)
+- uses the same timed capture behavior as the timed helper (countdown, launch OpenPose, wait for first JSON, timed stop)
+
+Fixed gesture order:
+
+1. `attack_earth`
+2. `attack_fire`
+3. `attack_water`
+4. `attack_air`
+5. `defense_earth`
+6. `defense_fire`
+7. `defense_water`
+8. `defense_air`
+
+Example usage from PowerShell:
+
+```powershell
+cd D:\Documentos\Python Projects\Avatar-Arcade-Game\tools
+.\record_gesture_cycle.ps1
+```
+
+This helper is useful when recording one complete cycle with the same `person` and `session` while keeping one consistent auto-assigned take label across all eight gestures.
