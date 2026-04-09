@@ -129,3 +129,31 @@ cd D:\Documentos\Python Projects\Avatar-Arcade-Game\tools
 ```
 
 This helper is useful when recording one complete cycle with the same `person` and `session` while keeping one consistent auto-assigned take label across all eight gestures.
+
+## Continuous full-cycle helper (PowerShell, JSON only)
+
+Use `record_gesture_cycle_continuous.ps1` when you want to launch OpenPose once and keep it running across the full 8-gesture cycle.
+
+What it does:
+
+- prompts once for person/session and frames-per-take
+- auto-assigns the next `take_###` label across all 8 gestures for that person/session
+- creates a unique live buffer run folder at `data/raw/live_buffer/openpose_session/session_YYYYMMDD_HHMMSS`
+- starts OpenPose one time with `--write_json` pointing to that live folder
+- waits until JSON output appears (capture is confirmed live)
+- for each gesture, copies exactly N *new* JSON files (fixed frame count) into:
+  - `data/raw/openpose_json/<gesture>/<person>/<session>/<take>/`
+- keeps OpenPose running between gestures (no restart between takes)
+
+Why this is useful for stability:
+
+- avoids repeated OpenPose shutdown/relaunch between gestures
+- keeps capture flow more consistent across one cycle
+- gives fixed-size JSON takes for cleaner downstream processing
+
+Example usage from PowerShell:
+
+```powershell
+cd D:\Documentos\Python Projects\Avatar-Arcade-Game\tools
+.\record_gesture_cycle_continuous.ps1
+```
