@@ -27,7 +27,9 @@ from src.utils.paths import load_paths_config, resolve_path
 # Locked schema / preprocessing constants (v1)
 # -----------------------------
 SEQUENCE_LENGTH = 90
-NUM_JOINTS = 25
+FULL_BODY25_JOINTS = 25
+SELECTED_BODY25_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15, 16, 17, 18]
+NUM_JOINTS = len(SELECTED_BODY25_INDICES)
 NUM_COORDS = 2  # x, y only for model v1
 FEATURES_PER_FRAME = NUM_JOINTS * NUM_COORDS
 METADATA_COLUMNS = [
@@ -45,13 +47,15 @@ METADATA_COLUMNS = [
     "was_all_zero_sample",
 ]
 
-# BODY_25 key joint indices (OpenPose order)
+# Selected upper-body BODY_25 subset indices (local subset order)
+# [Nose, Neck, RShoulder, RElbow, RWrist, LShoulder, LElbow, LWrist,
+#  MidHip, RHip, LHip, REye, LEye, REar, LEar]
 NECK_IDX = 1
 R_SHOULDER_IDX = 2
 L_SHOULDER_IDX = 5
 MID_HIP_IDX = 8
 R_HIP_IDX = 9
-L_HIP_IDX = 12
+L_HIP_IDX = 10
 
 # Confidence handling (weak filter)
 DEFAULT_CONFIDENCE_CUTOFF = 0.05
@@ -73,20 +77,15 @@ MULTI_JOINT_JUMP_SCALE_MULTIPLIER = 1.25
 CENTER_JUMP_SCALE_MULTIPLIER = 1.50
 MULTI_JOINT_MIN_COUNT = 2
 
-# BODY_25 left/right symmetry pairs for joint-level fallback imputation.
+# Upper-body subset left/right symmetry pairs for joint-level fallback imputation.
 # Each tuple is (left_joint_index, right_joint_index).
 SYMMETRIC_JOINT_PAIRS: list[tuple[int, int]] = [
     (2, 5),   # RShoulder <-> LShoulder
     (3, 6),   # RElbow <-> LElbow
     (4, 7),   # RWrist <-> LWrist
-    (9, 12),  # RHip <-> LHip
-    (10, 13), # RKnee <-> LKnee
-    (11, 14), # RAnkle <-> LAnkle
-    (15, 16), # REye <-> LEye
-    (17, 18), # REar <-> LEar
-    (22, 19), # RBigToe <-> LBigToe
-    (23, 20), # RSmallToe <-> LSmallToe
-    (24, 21), # RHeel <-> LHeel
+    (9, 10),  # RHip <-> LHip
+    (11, 12), # REye <-> LEye
+    (13, 14), # REar <-> LEar
 ]
 
 
@@ -105,7 +104,7 @@ class ParsedFrame:
 class SampleResult:
     """Processed output for one take folder."""
 
-    sample_90x50: np.ndarray
+    sample_90x30: np.ndarray
     num_raw_frames: int
     num_bad_frames: int
     num_joint_zero_fallbacks: int
@@ -214,10 +213,11 @@ def _parse_frame(frame_json_path: Path, confidence_cutoff: float) -> tuple[np.nd
         return None, None
 
     keypoints = people[0].get("pose_keypoints_2d", [])
-    if len(keypoints) < NUM_JOINTS * 3:
+    if len(keypoints) < FULL_BODY25_JOINTS * 3:
         return None, None
 
-    arr = np.asarray(keypoints, dtype=np.float32).reshape(NUM_JOINTS, 3)
+    arr = np.asarray(keypoints, dtype=np.float32).reshape(FULL_BODY25_JOINTS, 3)
+    arr = arr[SELECTED_BODY25_INDICES, :]
 
     # Keep x/y only for model v1 (do not flatten yet).
     xy = arr[:, :2].copy()
@@ -243,8 +243,8 @@ def _build_symmetric_counterpart_map() -> dict[int, int]:
 
 
 def _impute_joint_values_temporally(
-    sample_90x25x2: np.ndarray,
-    usable_90x25: np.ndarray,
+    sample_90x15x2: np.ndarray,
+    usable_90x15: np.ndarray,
 ) -> tuple[np.ndarray, int]:
     """Fill joint-level gaps over time for each joint independently.
 
@@ -256,12 +256,12 @@ def _impute_joint_values_temporally(
     Returns:
         (imputed_xy, num_interpolated_joint_frames)
     """
-    imputed = sample_90x25x2.copy()
+    imputed = sample_90x15x2.copy()
     seq_len, num_joints, _ = imputed.shape
     num_interpolations = 0
 
     for joint_idx in range(num_joints):
-        valid_mask = usable_90x25[:, joint_idx]
+        valid_mask = usable_90x15[:, joint_idx]
         valid_indices = np.flatnonzero(valid_mask)
 
         # If the joint is missing for the full take, leave it for symmetry/zero fallback.
@@ -300,8 +300,8 @@ def _impute_joint_values_temporally(
 
 
 def _fill_entirely_missing_joints_with_symmetry(
-    sample_90x25x2: np.ndarray,
-    usable_90x25: np.ndarray,
+    sample_90x15x2: np.ndarray,
+    usable_90x15: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Fill joints missing in all frames by mirroring symmetric counterpart if possible.
 
@@ -312,8 +312,8 @@ def _fill_entirely_missing_joints_with_symmetry(
     Returns:
         (updated_xy, updated_usable_mask, num_symmetric_joint_fills)
     """
-    filled = sample_90x25x2.copy()
-    usable_after = usable_90x25.copy()
+    filled = sample_90x15x2.copy()
+    usable_after = usable_90x15.copy()
     counterpart_map = _build_symmetric_counterpart_map()
     num_symmetric_fills = 0
 
@@ -340,7 +340,7 @@ def _fill_entirely_missing_joints_with_symmetry(
 
 
 def _build_sample_from_take(take_dir: Path, confidence_cutoff: float) -> SampleResult:
-    """Convert one take folder into a fixed sample with shape (90, 50)."""
+    """Convert one take folder into a fixed sample with shape (90, 30)."""
     json_paths = _collect_take_frame_paths(take_dir)
     num_raw_frames = len(json_paths)
 
@@ -467,9 +467,9 @@ def _build_sample_from_take(take_dir: Path, confidence_cutoff: float) -> SampleR
 
     if not good_indices:
         # Entire take is unusable.
-        sample_90x50 = np.zeros((SEQUENCE_LENGTH, FEATURES_PER_FRAME), dtype=np.float32)
+        sample_90x30 = np.zeros((SEQUENCE_LENGTH, FEATURES_PER_FRAME), dtype=np.float32)
         return SampleResult(
-            sample_90x50=sample_90x50,
+            sample_90x30=sample_90x30,
             num_raw_frames=num_raw_frames,
             num_bad_frames=SEQUENCE_LENGTH,
             num_joint_zero_fallbacks=SEQUENCE_LENGTH * NUM_JOINTS,
@@ -501,8 +501,8 @@ def _build_sample_from_take(take_dir: Path, confidence_cutoff: float) -> SampleR
             last_valid = repaired_frames[idx]
 
     # Convert repaired timeline to dense array for joint-level imputation work.
-    sample_90x25x2 = np.stack(repaired_frames, axis=0).astype(np.float32)
-    usable_90x25 = np.stack(
+    sample_90x15x2 = np.stack(repaired_frames, axis=0).astype(np.float32)
+    usable_90x15 = np.stack(
         [
             fr.usable_mask.copy() if fr.usable_mask is not None else np.zeros(NUM_JOINTS, dtype=bool)
             for fr in parsed_frames
@@ -514,16 +514,16 @@ def _build_sample_from_take(take_dir: Path, confidence_cutoff: float) -> SampleR
     # Joint-level imputation pass (v1)
     # -----------------------------
     # 1) Temporal interpolation/backfill/forward-fill for each joint independently.
-    sample_90x25x2, num_joint_interpolations = _impute_joint_values_temporally(
-        sample_90x25x2=sample_90x25x2,
-        usable_90x25=usable_90x25,
+    sample_90x15x2, num_joint_interpolations = _impute_joint_values_temporally(
+        sample_90x15x2=sample_90x15x2,
+        usable_90x15=usable_90x15,
     )
 
     # 2) Entirely missing joint fallback: mirror symmetric counterpart if available.
-    sample_90x25x2, usable_after_symmetry, num_joint_symmetric_fills = (
+    sample_90x15x2, usable_after_symmetry, num_joint_symmetric_fills = (
         _fill_entirely_missing_joints_with_symmetry(
-            sample_90x25x2=sample_90x25x2,
-            usable_90x25=usable_90x25,
+            sample_90x15x2=sample_90x15x2,
+            usable_90x15=usable_90x15,
         )
     )
 
@@ -531,15 +531,15 @@ def _build_sample_from_take(take_dir: Path, confidence_cutoff: float) -> SampleR
     missing_after_all = ~usable_after_symmetry
     num_joint_zero_fallbacks = int(np.count_nonzero(missing_after_all))
     if num_joint_zero_fallbacks > 0:
-        sample_90x25x2[missing_after_all] = 0.0
+        sample_90x15x2[missing_after_all] = 0.0
 
-    # Final flattening shape remains (90, 50).
-    sample_90x50 = sample_90x25x2.reshape(SEQUENCE_LENGTH, FEATURES_PER_FRAME)
+    # Final flattening shape remains (90, 30).
+    sample_90x30 = sample_90x15x2.reshape(SEQUENCE_LENGTH, FEATURES_PER_FRAME)
 
     num_bad_frames = sum(fr.is_bad for fr in parsed_frames)
 
     return SampleResult(
-        sample_90x50=sample_90x50,
+        sample_90x30=sample_90x30,
         num_raw_frames=num_raw_frames,
         num_bad_frames=num_bad_frames,
         num_joint_zero_fallbacks=num_joint_zero_fallbacks,
@@ -660,7 +660,7 @@ def build_openpose_dataset(
             confidence_cutoff=confidence_cutoff,
         )
 
-        samples_x.append(result.sample_90x50)
+        samples_x.append(result.sample_90x30)
         labels_y.append(label_to_id[gesture])
         per_class_counts[gesture] += 1
         total_bad_frames += result.num_bad_frames

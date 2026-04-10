@@ -7,8 +7,8 @@ This folder stores captured data for gesture collection.
 - Classes: **9 total** = 8 gesture classes + `idle`.
 - One take folder = **one labeled sample**.
 - One sample is expected to contain **90 frames**.
-- First model input per frame: **BODY_25 x,y only** (25 keypoints × 2) = **50 features**.
-- Therefore the target sample tensor shape is **(90, 50)**.
+- First model input per frame: **upper-body BODY_25 subset x,y only** (15 keypoints × 2) = **30 features**.
+- Therefore the target sample tensor shape is **(90, 30)**.
 
 ## Capture organization
 

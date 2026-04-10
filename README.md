@@ -121,14 +121,14 @@ Each take folder is treated as one sample.
 
 The command writes:
 
-- `data/processed/X.npy` with shape `(N, 90, 50)`
+- `data/processed/X.npy` with shape `(N, 90, 30)`
 - `data/processed/y.npy` with shape `(N,)`
 - `data/processed/metadata.csv` (one row per sample)
 - `data/processed/label_map.json` (target mode + label mappings)
 
 ### v1 normalization / repair choices
 
-- Uses BODY_25 keypoints, `x,y` only.
+- Uses an upper-body BODY_25 subset (15 joints), `x,y` only.
 - Uses `Neck` as center anchor with `MidHip` fallback.
 - Uses robust weighted body scale from shoulder width / torso length / hip width.
 - Smooths accepted frame scale over time (`0.8 * prev + 0.2 * current`).
