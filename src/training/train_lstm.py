@@ -124,18 +124,28 @@ def build_lstm_model(
     num_classes: int,
     lstm_units: int,
     learning_rate: float,
+    use_dropout: bool = True,
 ) -> keras.Model:
     """Build the requested simple baseline LSTM classifier."""
-    model = keras.Sequential(
+    model_layers: list[keras.layers.Layer] = [
+        keras.layers.Input(shape=input_shape),
+        keras.layers.Masking(mask_value=0.0),
+        keras.layers.LSTM(lstm_units),
+    ]
+
+    # In normal training we keep dropout for regularization.
+    # In tiny-overfit mode we can disable dropout to maximize memorization power.
+    if use_dropout:
+        model_layers.append(keras.layers.Dropout(0.3))
+
+    model_layers.extend(
         [
-            keras.layers.Input(shape=input_shape),
-            keras.layers.Masking(mask_value=0.0),
-            keras.layers.LSTM(lstm_units),
-            keras.layers.Dropout(0.3),
             keras.layers.Dense(32, activation="relu"),
             keras.layers.Dense(num_classes, activation="softmax"),
         ]
     )
+
+    model = keras.Sequential(model_layers)
 
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
@@ -179,8 +189,17 @@ def save_history(history: keras.callbacks.History, reports_dir: Path) -> None:
 
 def save_tiny_overfit_history(history: keras.callbacks.History, reports_dir: Path) -> None:
     """Save tiny-overfit history using dedicated filenames."""
+    save_tiny_overfit_history_for_model(history=history, reports_dir=reports_dir, tiny_model_type="lstm")
+
+
+def save_tiny_overfit_history_for_model(
+    history: keras.callbacks.History,
+    reports_dir: Path,
+    tiny_model_type: str,
+) -> None:
+    """Save tiny-overfit history with model-specific filenames (lstm/mlp)."""
     history_df = pd.DataFrame(history.history)
-    history_csv_path = reports_dir / "tiny_overfit_history.csv"
+    history_csv_path = reports_dir / f"tiny_overfit_{tiny_model_type}_history.csv"
     history_df.to_csv(history_csv_path, index=False)
 
     # In tiny-overfit mode we only train on one tiny subset (no validation split),
@@ -202,8 +221,31 @@ def save_tiny_overfit_history(history: keras.callbacks.History, reports_dir: Pat
     plt.legend()
 
     plt.tight_layout()
-    plt.savefig(reports_dir / "tiny_overfit_history.png", dpi=150)
+    plt.savefig(reports_dir / f"tiny_overfit_{tiny_model_type}_history.png", dpi=150)
     plt.close()
+
+
+def build_tiny_mlp_model(
+    input_dim: int,
+    num_classes: int,
+    learning_rate: float,
+) -> keras.Model:
+    """Build a simple MLP for tiny-overfit diagnostics on flattened inputs."""
+    model = keras.Sequential(
+        [
+            keras.layers.Input(shape=(input_dim,)),
+            keras.layers.Dense(256, activation="relu"),
+            keras.layers.Dense(128, activation="relu"),
+            keras.layers.Dense(num_classes, activation="softmax"),
+        ]
+    )
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
 
 
 def build_tiny_balanced_subset(
@@ -239,6 +281,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Run a tiny diagnostic training mode (up to 2 samples per class, no split) "
             "to check if the pipeline can memorize a very small dataset."
+        ),
+    )
+    parser.add_argument(
+        "--tiny-model-type",
+        type=str,
+        default="lstm",
+        choices=["lstm", "mlp"],
+        help=(
+            "Model architecture to use in --tiny-overfit mode. "
+            "Use 'lstm' (default) or 'mlp'."
         ),
     )
     return parser.parse_args()
@@ -314,6 +366,7 @@ def main() -> None:
     if args.tiny_overfit:
         print("\n=== Tiny Overfit Diagnostic Mode (enabled) ===")
         print("This mode trains on a tiny balanced subset only (no train/val/test split).")
+        print(f"Tiny model type: {args.tiny_model_type}")
 
         # Build a tiny subset with up to 2 samples per class.
         x_tiny, y_tiny = build_tiny_balanced_subset(
@@ -326,31 +379,55 @@ def main() -> None:
         print(f"Tiny subset shape: X={x_tiny.shape}, y={y_tiny.shape}")
         print("Expected target is ~18 samples for 9 classes (if all classes have >= 2 samples).")
 
-        # Keep the same architecture and input shape as normal training.
-        model = build_lstm_model(
-            input_shape=(x.shape[1], x.shape[2]),
-            num_classes=9,
-            lstm_units=lstm_units,
-            learning_rate=learning_rate,
-        )
+        # Tiny-overfit configuration is intentionally aggressive so we can test
+        # "can this representation be memorized at all?" in a very direct way.
+        tiny_epochs = 300
+        tiny_batch_size = 1
+
+        if args.tiny_model_type == "lstm":
+            # Tiny LSTM mode:
+            # - bigger LSTM (128 units instead of normal default 64)
+            # - dropout disabled to remove regularization during memorization test
+            model = build_lstm_model(
+                input_shape=(x.shape[1], x.shape[2]),
+                num_classes=9,
+                lstm_units=128,
+                learning_rate=learning_rate,
+                use_dropout=False,
+            )
+            x_tiny_train = x_tiny
+        else:
+            # Tiny MLP mode:
+            # - flatten each sequence from (90, 30) to 2700 features
+            # - no dropout layers
+            x_tiny_train = x_tiny.reshape(x_tiny.shape[0], -1)
+            model = build_tiny_mlp_model(
+                input_dim=x_tiny_train.shape[1],
+                num_classes=9,
+                learning_rate=learning_rate,
+            )
 
         print("\n=== Model Summary ===")
         model.summary()
 
         # Diagnostic behavior:
-        # - more epochs to give model enough time to memorize
-        # - no early stopping
-        # - verbose=1 so training accuracy is printed each epoch
-        tiny_epochs = 50
+        # - 300 epochs to give model enough time to memorize tiny data
+        # - batch size 1 for strongest per-sample fitting pressure
+        # - no early stopping (we want to observe full memorization trajectory)
+        # - verbose=1 prints loss/accuracy every epoch
         history = model.fit(
-            x_tiny,
+            x_tiny_train,
             y_tiny,
             epochs=tiny_epochs,
-            batch_size=batch_size,
+            batch_size=tiny_batch_size,
             verbose=1,
         )
 
-        save_tiny_overfit_history(history, reports_dir)
+        save_tiny_overfit_history_for_model(
+            history=history,
+            reports_dir=reports_dir,
+            tiny_model_type=args.tiny_model_type,
+        )
 
         final_train_loss = float(history.history.get("loss", [np.nan])[-1])
         final_train_acc = float(history.history.get("accuracy", [np.nan])[-1])
@@ -365,6 +442,7 @@ def main() -> None:
             print(f"  - {class_id} ({class_name}): {count}")
         print(f"Final training accuracy: {final_train_acc:.4f}")
         print(f"Final training loss: {final_train_loss:.4f}")
+        print(f"Model type used: {args.tiny_model_type}")
 
         print("\nInterpretation hint:")
         if final_train_acc >= 0.90:
@@ -379,8 +457,14 @@ def main() -> None:
             )
 
         print("\n=== Saved Tiny Overfit Outputs ===")
-        print(f"- Tiny history CSV: {reports_dir / 'tiny_overfit_history.csv'}")
-        print(f"- Tiny history plot: {reports_dir / 'tiny_overfit_history.png'}")
+        print(
+            f"- Tiny history CSV: "
+            f"{reports_dir / f'tiny_overfit_{args.tiny_model_type}_history.csv'}"
+        )
+        print(
+            f"- Tiny history plot: "
+            f"{reports_dir / f'tiny_overfit_{args.tiny_model_type}_history.png'}"
+        )
         return
 
     train_idx, val_idx, test_idx = split_data_stratified(x, y, random_state=random_seed)
