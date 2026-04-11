@@ -43,6 +43,12 @@ def get_training_value(config: dict[str, Any], key: str, default: Any) -> Any:
     return training_cfg.get(key, default)
 
 
+def has_training_value(config: dict[str, Any], key: str) -> bool:
+    """Return True when config['training'] explicitly provides a given key."""
+    training_cfg = config.get("training", {}) if isinstance(config, dict) else {}
+    return key in training_cfg
+
+
 def load_processed_data(processed_dir: Path) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Load model inputs/targets + label mapping information."""
     x_path = processed_dir / "X.npy"
@@ -125,13 +131,19 @@ def build_lstm_model(
     lstm_units: int,
     learning_rate: float,
     use_dropout: bool = True,
+    use_masking: bool = True,
 ) -> keras.Model:
     """Build the requested simple baseline LSTM classifier."""
-    model_layers: list[keras.layers.Layer] = [
-        keras.layers.Input(shape=input_shape),
-        keras.layers.Masking(mask_value=0.0),
-        keras.layers.LSTM(lstm_units),
-    ]
+    model_layers: list[keras.layers.Layer] = [keras.layers.Input(shape=input_shape)]
+
+    # IMPORTANT:
+    # - Masking is useful only when a special value (like 0.0) encodes "missing/padded" frames.
+    # - After z-score standardization, 0.0 is simply "mean value", not "missing".
+    # - Therefore, standardized sequence paths should disable masking (use_masking=False).
+    if use_masking:
+        model_layers.append(keras.layers.Masking(mask_value=0.0))
+
+    model_layers.append(keras.layers.LSTM(lstm_units))
 
     # In normal training we keep dropout for regularization.
     # In tiny-overfit mode we can disable dropout to maximize memorization power.
@@ -183,7 +195,6 @@ def build_lstm_motion_model(
     model = keras.Sequential(
         [
             keras.layers.Input(shape=input_shape),
-            keras.layers.Masking(mask_value=0.0),
             keras.layers.LSTM(128),
             keras.layers.Dropout(0.2),
             keras.layers.Dense(64, activation="relu"),
@@ -197,6 +208,71 @@ def build_lstm_motion_model(
         metrics=["accuracy"],
     )
     return model
+
+
+def build_gru_motion_model(
+    input_shape: tuple[int, int],
+    num_classes: int,
+    learning_rate: float,
+) -> keras.Model:
+    """Build the requested GRU motion-aware architecture (no dropout for first test)."""
+    model = keras.Sequential(
+        [
+            keras.layers.Input(shape=input_shape),
+            keras.layers.GRU(128),
+            keras.layers.Dense(64, activation="relu"),
+            keras.layers.Dense(num_classes, activation="softmax"),
+        ]
+    )
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
+
+
+def compute_sequence_normalization_stats(x_train_seq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Compute per-feature mean/std from training split only for 3D sequence tensors.
+
+    Expected input shape:
+    - (samples, timesteps, features)
+
+    Reduction axes for train-only statistics:
+    - across samples axis (axis=0)
+    - across timesteps axis (axis=1)
+    - keep feature axis separate
+    """
+    if x_train_seq.ndim != 3:
+        raise ValueError(
+            f"Expected 3D sequence array (samples, timesteps, features), got {x_train_seq.shape}"
+        )
+    feature_mean = np.mean(x_train_seq, axis=(0, 1), keepdims=True)
+    feature_std = np.std(x_train_seq, axis=(0, 1), keepdims=True)
+    return feature_mean, feature_std
+
+
+def standardize_sequence_data(
+    x_data: np.ndarray,
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
+) -> np.ndarray:
+    """Apply feature-wise standardization: X_std = (X - mean) / (std + 1e-8)."""
+    return (x_data - feature_mean) / (feature_std + 1e-8)
+
+
+def save_sequence_normalization_stats(
+    reports_dir: Path,
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
+) -> tuple[Path, Path]:
+    """Persist train-only sequence normalization stats for reproducible future runs."""
+    mean_path = reports_dir / "sequence_feature_mean.npy"
+    std_path = reports_dir / "sequence_feature_std.npy"
+    np.save(mean_path, feature_mean)
+    np.save(std_path, feature_std)
+    return mean_path, std_path
 
 
 def save_tiny_overfit_history(history: keras.callbacks.History, reports_dir: Path) -> None:
@@ -291,10 +367,10 @@ def parse_args() -> argparse.Namespace:
         "--model-type",
         type=str,
         default="lstm",
-        choices=["lstm", "mlp", "lstm_motion"],
+        choices=["lstm", "mlp", "lstm_motion", "gru_motion"],
         help=(
             "Model architecture for normal full-dataset training mode. "
-            "Use 'lstm' (default), 'mlp', or 'lstm_motion'."
+            "Use 'lstm' (default), 'mlp', 'lstm_motion', or 'gru_motion'."
         ),
     )
     parser.add_argument(
@@ -653,24 +729,67 @@ def main() -> None:
 
     if args.model_type == "lstm":
         epochs = int(get_training_value(config, "epochs", 20))
-        # Keep existing LSTM behavior unchanged in normal mode.
+
+        # Sequence-model defaults are intentionally more conservative/stable.
+        # "Unless explicitly configured otherwise":
+        # - prefer sequence_* keys when present
+        # - otherwise fallback to generic training keys when present
+        # - otherwise use sequence-safe defaults (batch=16, lr=1e-4)
+        if has_training_value(config, "sequence_batch_size"):
+            sequence_batch_size = int(get_training_value(config, "sequence_batch_size", 16))
+        elif has_training_value(config, "batch_size"):
+            sequence_batch_size = int(get_training_value(config, "batch_size", 16))
+        else:
+            sequence_batch_size = 16
+
+        if has_training_value(config, "sequence_learning_rate"):
+            sequence_learning_rate = float(get_training_value(config, "sequence_learning_rate", 1e-4))
+        elif has_training_value(config, "learning_rate"):
+            sequence_learning_rate = float(get_training_value(config, "learning_rate", 1e-4))
+        else:
+            sequence_learning_rate = 1e-4
+
+        # Standardize sequence tensors using train-split-only statistics.
+        feature_mean, feature_std = compute_sequence_normalization_stats(x_train)
+        x_train_model = standardize_sequence_data(x_train, feature_mean, feature_std)
+        x_val_model = standardize_sequence_data(x_val, feature_mean, feature_std)
+        x_test_model = standardize_sequence_data(x_test, feature_mean, feature_std)
+        mean_path, std_path = save_sequence_normalization_stats(reports_dir, feature_mean, feature_std)
+
         model = build_lstm_model(
             input_shape=(x.shape[1], x.shape[2]),
             num_classes=9,
             lstm_units=lstm_units,
-            learning_rate=learning_rate,
+            learning_rate=sequence_learning_rate,
+            use_masking=False,
         )
-        x_train_model, x_val_model, x_test_model = x_train, x_val, x_test
         checkpoint_path = checkpoints_dir / "best_lstm.keras"
         filename_prefix = ""
         callbacks = [
-            keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
+            keras.callbacks.EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
+            keras.callbacks.ReduceLROnPlateau(
+                monitor="val_loss",
+                factor=0.5,
+                patience=4,
+                min_lr=1e-6,
+            ),
             keras.callbacks.ModelCheckpoint(
                 filepath=str(checkpoint_path),
                 monitor="val_loss",
                 save_best_only=True,
             ),
         ]
+        batch_size = sequence_batch_size
+
+        print("\n=== Sequence Model Details ===")
+        print("Model type: lstm")
+        print("Representation used: original sequence positions")
+        print("Standardization applied: yes (train split only)")
+        print(f"Original input shape: {x.shape[1:]}")
+        print(f"Motion-aware shape: not used for this mode")
+        print(f"Sequence batch size: {sequence_batch_size}")
+        print(f"Sequence learning rate: {sequence_learning_rate}")
+        print(f"Normalization stats saved to: {mean_path} and {std_path}")
     elif args.model_type == "mlp":
         epochs = int(get_training_value(config, "epochs", 100))
         # MLP baseline:
@@ -705,27 +824,66 @@ def main() -> None:
             ),
         ]
     else:
-        # Motion-aware LSTM baseline:
+        # Motion-aware sequence baseline (LSTM or GRU):
         # - keeps original processed X.npy untouched
         # - derives explicit motion (frame-to-frame deltas) during training
+        # - standardizes using train-only stats
         epochs = 100
         x_motion = build_motion_aware_sequences(x)
         x_train_model = x_motion[train_idx]
         x_val_model = x_motion[val_idx]
         x_test_model = x_motion[test_idx]
 
+        # Sequence-model defaults are intentionally more conservative/stable.
+        if has_training_value(config, "sequence_batch_size"):
+            sequence_batch_size = int(get_training_value(config, "sequence_batch_size", 16))
+        elif has_training_value(config, "batch_size"):
+            sequence_batch_size = int(get_training_value(config, "batch_size", 16))
+        else:
+            sequence_batch_size = 16
+
+        if has_training_value(config, "sequence_learning_rate"):
+            sequence_learning_rate = float(get_training_value(config, "sequence_learning_rate", 1e-4))
+        elif has_training_value(config, "learning_rate"):
+            sequence_learning_rate = float(get_training_value(config, "learning_rate", 1e-4))
+        else:
+            sequence_learning_rate = 1e-4
+
+        feature_mean, feature_std = compute_sequence_normalization_stats(x_train_model)
+        x_train_model = standardize_sequence_data(x_train_model, feature_mean, feature_std)
+        x_val_model = standardize_sequence_data(x_val_model, feature_mean, feature_std)
+        x_test_model = standardize_sequence_data(x_test_model, feature_mean, feature_std)
+        mean_path, std_path = save_sequence_normalization_stats(reports_dir, feature_mean, feature_std)
+
         print("\n=== Input Representation ===")
         print("Representation: position + delta (motion-aware)")
         print(f"Original per-sample shape: {x.shape[1:]}")
         print(f"Motion-aware per-sample shape: {x_train_model.shape[1:]}")
+        print("Standardization applied: yes (train split only)")
+        print(f"Sequence batch size: {sequence_batch_size}")
+        print(f"Sequence learning rate: {sequence_learning_rate}")
+        print(f"Normalization stats saved to: {mean_path} and {std_path}")
 
-        model = build_lstm_motion_model(
-            input_shape=(x_train_model.shape[1], x_train_model.shape[2]),
-            num_classes=9,
-            learning_rate=learning_rate,
-        )
-        checkpoint_path = checkpoints_dir / "best_lstm_motion.keras"
-        filename_prefix = "lstm_motion_"
+        if args.model_type == "lstm_motion":
+            model = build_lstm_motion_model(
+                input_shape=(x_train_model.shape[1], x_train_model.shape[2]),
+                num_classes=9,
+                learning_rate=sequence_learning_rate,
+            )
+            checkpoint_path = checkpoints_dir / "best_lstm_motion.keras"
+            filename_prefix = "lstm_motion_"
+        else:
+            model = build_gru_motion_model(
+                input_shape=(x_train_model.shape[1], x_train_model.shape[2]),
+                num_classes=9,
+                learning_rate=sequence_learning_rate,
+            )
+            checkpoint_path = checkpoints_dir / "best_gru_motion.keras"
+            filename_prefix = "gru_motion_"
+
+        print(f"Model type: {args.model_type}")
+        print("Masking used: no (after standardization, zero no longer means missing)")
+
         callbacks = [
             keras.callbacks.EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
             keras.callbacks.ReduceLROnPlateau(
@@ -740,6 +898,7 @@ def main() -> None:
                 save_best_only=True,
             ),
         ]
+        batch_size = sequence_batch_size
 
     print("\n=== Model Summary ===")
     model.summary()
