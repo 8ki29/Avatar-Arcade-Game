@@ -459,7 +459,6 @@ def main() -> None:
     config = load_config(Path("configs/config.yaml"))
 
     random_seed = int(get_training_value(config, "random_seed", 42))
-    epochs = int(get_training_value(config, "epochs", 20))
     batch_size = int(get_training_value(config, "batch_size", 32))
     learning_rate = float(get_training_value(config, "learning_rate", 0.001))
     lstm_units = int(get_training_value(config, "lstm_units", 64))
@@ -610,6 +609,7 @@ def main() -> None:
     print_split_summary("Test", y_test, label_map)
 
     if args.model_type == "lstm":
+        epochs = int(get_training_value(config, "epochs", 20))
         # Keep existing LSTM behavior unchanged in normal mode.
         model = build_lstm_model(
             input_shape=(x.shape[1], x.shape[2]),
@@ -620,7 +620,16 @@ def main() -> None:
         x_train_model, x_val_model, x_test_model = x_train, x_val, x_test
         checkpoint_path = checkpoints_dir / "best_lstm.keras"
         filename_prefix = ""
+        callbacks = [
+            keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
+            keras.callbacks.ModelCheckpoint(
+                filepath=str(checkpoint_path),
+                monitor="val_loss",
+                save_best_only=True,
+            ),
+        ]
     else:
+        epochs = int(get_training_value(config, "epochs", 100))
         # MLP baseline:
         # - flatten each sample from (90, 30) into 2700 features
         # - train and evaluate with the exact same split indices as LSTM
@@ -638,14 +647,26 @@ def main() -> None:
         )
         checkpoint_path = checkpoints_dir / "best_mlp.keras"
         filename_prefix = "mlp_"
+        callbacks = [
+            keras.callbacks.EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
+            keras.callbacks.ReduceLROnPlateau(
+                monitor="val_loss",
+                factor=0.5,
+                patience=4,
+                min_lr=1e-6,
+            ),
+            keras.callbacks.ModelCheckpoint(
+                filepath=str(checkpoint_path),
+                monitor="val_loss",
+                save_best_only=True,
+            ),
+        ]
 
     print("\n=== Model Summary ===")
     model.summary()
-
-    callbacks = [
-        keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
-        keras.callbacks.ModelCheckpoint(filepath=str(checkpoint_path), monitor="val_loss", save_best_only=True),
-    ]
+    print("\n=== Training Configuration ===")
+    print(f"Max epochs: {epochs}")
+    print(f"Batch size: {batch_size}")
 
     history = model.fit(
         x_train_model,
@@ -656,6 +677,12 @@ def main() -> None:
         callbacks=callbacks,
         verbose=1,
     )
+    epochs_ran = len(history.history.get("loss", []))
+    early_stopped = epochs_ran < epochs
+    val_loss_history = history.history.get("val_loss", [])
+    val_acc_history = history.history.get("val_accuracy", [])
+    best_val_loss_epoch = int(np.argmin(val_loss_history) + 1) if val_loss_history else None
+    best_val_acc_epoch = int(np.argmax(val_acc_history) + 1) if val_acc_history else None
 
     val_loss, val_acc = model.evaluate(x_val_model, y_val, verbose=0)
     test_loss, test_acc = model.evaluate(x_test_model, y_test, verbose=0)
@@ -675,6 +702,13 @@ def main() -> None:
     print("\n=== Final Metrics ===")
     print(f"Validation accuracy: {val_acc:.4f} (loss: {val_loss:.4f})")
     print(f"Test accuracy: {test_acc:.4f} (loss: {test_loss:.4f})")
+    print("\n=== Training Run Summary ===")
+    print(f"Epochs actually run: {epochs_ran}/{epochs}")
+    print(f"EarlyStopping triggered: {'yes' if early_stopped else 'no'}")
+    if best_val_loss_epoch is not None:
+        print(f"Best val_loss epoch: {best_val_loss_epoch}")
+    if best_val_acc_epoch is not None:
+        print(f"Best val_accuracy epoch: {best_val_acc_epoch}")
 
     print("\n=== Saved Outputs ===")
     print(f"- Best checkpoint: {checkpoint_path}")
