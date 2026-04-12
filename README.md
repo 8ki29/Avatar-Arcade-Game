@@ -228,3 +228,34 @@ Outputs are written to a timestamped folder under:
 Project journey document for report writing:
 
 - `docs/project_journey.md`
+
+## Misclassification analysis workflow (full_mlp-focused)
+
+Use this script after a training run to inspect test-set mistakes in a structured way:
+
+```bash
+python -m src.analysis.analyze_misclassifications --run-dir models/experiment_runs/<timestamp>/full_mlp
+```
+
+Convenience options are also available:
+
+```bash
+# Analyze full_mlp inside a known suite folder
+python -m src.analysis.analyze_misclassifications --suite-dir models/experiment_runs/<timestamp>
+
+# Analyze full_mlp from the latest suite folder under models/experiment_runs
+python -m src.analysis.analyze_misclassifications --latest-suite-dir
+```
+
+Outputs are saved to:
+
+- `<run-dir>/misclassification_analysis/summary.json`
+- `<run-dir>/misclassification_analysis/summary.md`
+- `<run-dir>/misclassification_analysis/confusions_by_pair.csv`
+- `<run-dir>/misclassification_analysis/misclassified_samples.csv`
+- `<run-dir>/misclassification_analysis/highest_confidence_errors.csv`
+- `<run-dir>/misclassification_analysis/hardest_correct_samples.csv`
+- optional plots (`per_class_error_bar.png`, `top_confusion_pairs_bar.png`)
+
+Training runs now also save a richer run-local `predictions.csv` to support traceable error analysis
+(sample index, labels, confidence, per-class probabilities, and metadata fields when available).

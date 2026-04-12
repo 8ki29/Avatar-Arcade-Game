@@ -483,8 +483,11 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 def save_test_reports(
     y_test: np.ndarray,
     y_pred: np.ndarray,
+    y_pred_probs: np.ndarray,
     label_map: dict[str, Any],
     reports_dir: Path,
+    test_indices: np.ndarray | None = None,
+    metadata_df: pd.DataFrame | None = None,
     filename_prefix: str = "",
 ) -> None:
     """Save classification report, confusion matrix, and per-sample predictions."""
@@ -519,15 +522,42 @@ def save_test_reports(
     plt.savefig(reports_dir / f"{filename_prefix}confusion_matrix.png", dpi=150)
     plt.close()
 
+    class_ids_sorted = sorted(id_to_name.keys())
+    predicted_confidence = np.max(y_pred_probs, axis=1)
+    true_confidence = y_pred_probs[np.arange(len(y_test)), y_test]
+
     predictions_df = pd.DataFrame(
         {
-            "y_true": y_test,
-            "y_pred": y_pred,
-            "true_label": [id_to_name.get(int(v), f"class_{int(v)}") for v in y_test],
-            "pred_label": [id_to_name.get(int(v), f"class_{int(v)}") for v in y_pred],
+            "sample_index": test_indices if test_indices is not None else np.arange(len(y_test)),
+            "split": "test",
+            "true_label_id": y_test,
+            "true_label_name": [id_to_name.get(int(v), f"class_{int(v)}") for v in y_test],
+            "predicted_label_id": y_pred,
+            "predicted_label_name": [id_to_name.get(int(v), f"class_{int(v)}") for v in y_pred],
+            "confidence_of_predicted_class": predicted_confidence,
+            "confidence_of_true_class": true_confidence,
+            "is_correct": y_test == y_pred,
         }
     )
+
+    # Add one probability column per class for richer downstream error analysis.
+    for class_id in class_ids_sorted:
+        class_name = id_to_name.get(int(class_id), f"class_{int(class_id)}")
+        safe_name = class_name.lower().replace(" ", "_")
+        predictions_df[f"prob_{safe_name}"] = y_pred_probs[:, int(class_id)]
+
+    # Add traceability fields from preprocessing metadata (if available).
+    if metadata_df is not None and "sample_index" in metadata_df.columns:
+        metadata_fields = ["gesture", "person", "session", "take", "sample_path"]
+        metadata_subset_cols = [c for c in metadata_fields if c in metadata_df.columns]
+        if metadata_subset_cols:
+            metadata_subset = metadata_df[["sample_index", *metadata_subset_cols]].copy()
+            predictions_df = predictions_df.merge(metadata_subset, on="sample_index", how="left")
+
+    # Backward-compatible artifact name.
     predictions_df.to_csv(reports_dir / f"{filename_prefix}test_predictions.csv", index=False)
+    # Canonical name for analysis workflows.
+    predictions_df.to_csv(reports_dir / "predictions.csv", index=False)
 
 
 def save_history(
@@ -697,6 +727,20 @@ def main() -> None:
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     x, y, label_map = load_processed_data(processed_dir)
+    metadata_df: pd.DataFrame | None = None
+    metadata_path = processed_dir / "metadata.csv"
+    if metadata_path.exists():
+        metadata_df = pd.read_csv(metadata_path).reset_index(drop=True)
+        if "sample_index" not in metadata_df.columns:
+            metadata_df.insert(0, "sample_index", np.arange(len(metadata_df)))
+        if len(metadata_df) != len(y):
+            print(
+                "\nWarning: metadata.csv row count does not match dataset size. "
+                "Skipping metadata join for predictions export."
+            )
+            metadata_df = None
+    else:
+        print("\nNote: metadata.csv not found in data/processed; predictions export will omit traceability fields.")
     print_dataset_summary(x, y, label_map)
 
     if x.ndim != 3:
@@ -1189,8 +1233,11 @@ def main() -> None:
     save_test_reports(
         y_test=y_test,
         y_pred=y_pred,
+        y_pred_probs=y_pred_probs,
         label_map=label_map,
         reports_dir=reports_dir,
+        test_indices=test_idx,
+        metadata_df=metadata_df,
         filename_prefix=filename_prefix,
     )
 
