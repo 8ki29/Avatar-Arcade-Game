@@ -298,3 +298,27 @@ Outputs are saved to:
 - `<run-dir>/take_review/review_case_*.png`
 - optional `<run-dir>/take_review/top_confusions_contact_sheet.png`
 
+
+## Recollection + curation planning workflow (dataset refinement)
+
+After running misclassification analysis and visual take review, generate a targeted data-improvement plan:
+
+```bash
+python -m src.analysis.plan_recollection --run-dir models/experiment_runs/<timestamp>/full_mlp
+```
+
+What it does:
+
+- synthesizes existing run artifacts (`predictions.csv`, `misclassification_analysis/*.csv`, `take_review/review_summary.json`, `take_review/review_summary.md`)
+- ranks confusion boundaries using transparent multi-signal scoring
+- flags existing ambiguous takes for manual review
+- proposes a modest, prioritized recollection target list with performer-instruction notes
+- outputs a practical curation workflow checklist (no automatic relabel/delete actions)
+
+Outputs are saved to:
+
+- `<run-dir>/recollection_plan/recollection_plan.md`
+- `<run-dir>/recollection_plan/recollection_plan.json`
+- `<run-dir>/recollection_plan/priority_review_takes.csv`
+- `<run-dir>/recollection_plan/priority_recollect_targets.csv`
+- optional `<run-dir>/recollection_plan/boundary_priority_bar.png`
