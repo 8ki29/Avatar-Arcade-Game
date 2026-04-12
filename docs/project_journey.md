@@ -274,3 +274,43 @@ The purpose of this visual phase is to determine whether residual mistakes are d
   - optional `top_confusions_contact_sheet.png` dashboard
 - Main command shape:
   - `python -m src.analysis.review_confusing_takes --run-dir models/experiment_runs/<timestamp>/full_mlp`
+
+## Dataset refinement planning phase: targeted recollection and curation
+
+The repaired confidence/traceability analysis and visual take review both succeeded, and they converged on the same practical conclusion:
+**the current pose-only full_mlp baseline is still strong**.
+At this point, remaining mistakes appear concentrated in a small number of ambiguous gesture boundaries rather than reflecting broad model-capacity failure.
+
+That shifts the next step away from immediate model exploration and toward **data refinement planning**.
+The goal of this phase is to convert existing error/review findings into a concrete, limited-scope recollection and curation plan before running more model variants.
+
+Primary boundary targets identified for focused follow-up:
+
+- `attack_fire` vs `defense_fire`
+- `defense_earth` vs `idle`
+
+### Why this phase matters
+
+Because residual errors are concentrated, the highest-leverage intervention is to:
+
+- identify which existing takes look ambiguous and should be reviewed first,
+- prioritize which class boundaries should receive targeted recollection first,
+- improve performer instructions where class definitions are currently too close in execution,
+- define practical (modest) recollection batches instead of large broad recapture.
+
+### Implementation note
+
+- Added `src/analysis/plan_recollection.py`.
+- Main command:
+  - `python -m src.analysis.plan_recollection --run-dir models/experiment_runs/<timestamp>/full_mlp`
+- The script reads existing run analysis artifacts and writes recollection planning outputs under:
+  - `<run-dir>/recollection_plan/`
+- Main outputs:
+  - `recollection_plan.md`
+  - `recollection_plan.json`
+  - `priority_review_takes.csv`
+  - `priority_recollect_targets.csv`
+  - optional `boundary_priority_bar.png`
+
+This phase is intentionally planning-only: it does **not** retrain models, relabel data automatically, or delete samples.
+It provides actionable next steps so dataset improvements can be executed and measured before additional model exploration.
