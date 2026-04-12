@@ -102,7 +102,10 @@ What the launcher does:
 - clears old JSON by default (use `-KeepJson` to keep prior files)
 - starts `python -m src.inference.live_openpose_debug` on the same JSON folder
 - forwards useful flags: `-TrackingMode`, `-PrintEveryN`, `-NoQuietWarmup`
-- stops OpenPose automatically when you stop the classifier (Ctrl+C)
+- **does not kill OpenPose by default** when startup timeout is hit, classifier exits, or you press Ctrl+C
+- leaves OpenPose running intentionally for machine safety/debugging; close OpenPose manually when done
+- optional automatic cleanup is opt-in only via `-KillOpenPoseOnExit`
+- supports safer startup timing via `-OpenPoseStartupTimeoutSec 60` (default) or `-OpenPoseStartupTimeoutSec 0` to wait indefinitely
 
 ## Development Roadmap (Scaffold-First)
 

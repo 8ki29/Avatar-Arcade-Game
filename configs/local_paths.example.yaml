@@ -16,3 +16,8 @@ live_json_dir: "data/raw/live_buffer/openpose_session/live_test"
 
 # Optional: camera index/name passed through as --camera
 # openpose_camera: 0
+
+# Launcher safety notes (set on command line, not in this YAML):
+# - Default startup timeout is 60s: -OpenPoseStartupTimeoutSec 60
+# - Use 0 to wait indefinitely for first JSON: -OpenPoseStartupTimeoutSec 0
+# - OpenPose auto-kill is opt-in only: -KillOpenPoseOnExit
