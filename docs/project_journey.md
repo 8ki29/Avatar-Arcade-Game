@@ -314,3 +314,39 @@ Because residual errors are concentrated, the highest-leverage intervention is t
 
 This phase is intentionally planning-only: it does **not** retrain models, relabel data automatically, or delete samples.
 It provides actionable next steps so dataset improvements can be executed and measured before additional model exploration.
+
+## Live real-time debug classifier for OpenPose JSON stream (v1)
+
+To tighten the loop between offline experiments and practical gameplay integration, we added a **live debug inference tool** for the current best model path (pose-only `full_mlp`).
+The immediate goal is to verify real-time behavior while OpenPose is still writing JSON frames, before wiring predictions into any gameplay gate.
+
+### Why this was added
+
+Offline metrics are strong, but they do not directly show how predictions behave under live frame drops, tracking jumps, and rolling-window flicker.
+This tool adds an operational check layer that can be run side-by-side with OpenPose Demo output.
+
+### How live preprocessing differs from offline preprocessing
+
+Offline dataset build can use non-causal timeline repair (including start-of-sequence future fill and interpolation across future frames).
+Live inference cannot rely on future frames, so runtime preprocessing now uses **causal-only repairs**:
+
+- bad/suspicious whole frame -> copy last accepted processed frame,
+- missing joint fallback order:
+  1) previous valid joint value,
+  2) mirrored symmetric counterpart (if available),
+  3) zero fallback.
+
+This keeps live behavior conceptually aligned with the offline normalization intent while staying runtime-safe.
+
+### What v1 includes
+
+- New shared runtime preprocessing module (`src/preprocessing/runtime_preprocess.py`) that matches the same upper-body 15-joint BODY_25 subset and x/y-only representation.
+- Same center and weighted-scale strategy as offline (`Neck` primary, `MidHip` fallback; shoulder/torso/hip weighting), with causal temporal scale smoothing.
+- Conservative suspicious-jump detection compatible with offline identity-switch handling intent.
+- New live CLI tool (`src/inference/live_openpose_debug.py`) that:
+  - watches a JSON directory continuously,
+  - maintains a rolling `(90, 30)` buffer,
+  - flattens to `(1, 2700)` for pose-only MLP inference,
+  - shows raw + smoothed prediction and top-3 probabilities,
+  - prints repair/debug state and buffer fill,
+  - logs inference rows to CSV for later review.
