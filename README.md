@@ -274,3 +274,27 @@ Outputs are saved to:
 
 Training runs now also save a richer run-local `predictions.csv` to support traceable error analysis
 (sample index, labels, confidence, per-class probabilities, and metadata fields when available).
+
+
+## Visual take-review workflow (confusing take inspection)
+
+After misclassification analysis, generate visual case-by-case take comparisons for the most important confusion pairs:
+
+```bash
+python -m src.analysis.review_confusing_takes --run-dir models/experiment_runs/<timestamp>/full_mlp
+```
+
+What it does:
+
+- loads run artifacts (`predictions.csv` + `misclassification_analysis/*.csv`)
+- prioritizes top confusion pairs and selects representative misclassified samples
+- adds strong correct + borderline correct references for side-by-side visual comparison
+- renders sampled OpenPose skeleton frames as clean static comparison figures
+
+Outputs are saved to:
+
+- `<run-dir>/take_review/review_summary.md`
+- `<run-dir>/take_review/review_summary.json`
+- `<run-dir>/take_review/review_case_*.png`
+- optional `<run-dir>/take_review/top_confusions_contact_sheet.png`
+

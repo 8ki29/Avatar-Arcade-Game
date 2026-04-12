@@ -243,3 +243,34 @@ Repaired outputs now contain (when available):
 - second-best prediction label/confidence,
 - per-sample traceability fields (`gesture`, `person`, `session`, `take`, `original_sample_path`),
 - confidence and traceability availability stats in both `summary.json` and `summary.md`.
+
+## Visual error inspection phase: reviewing confusing takes
+
+After repairing misclassification confidence values and metadata traceability, the error pattern looked concentrated rather than random.
+The remaining mistakes are still dominated by a few confusion clusters, especially:
+
+- `attack_fire` vs `defense_fire`
+- `defense_earth` vs `idle`
+- a smaller `attack_air` -> `attack_water` case
+
+That concentration suggested the next step should **not** be another immediate model replacement.
+Instead, the more useful next step is targeted visual take inspection on the exact confusing samples from the best `full_mlp` run.
+
+The purpose of this visual phase is to determine whether residual mistakes are driven more by:
+
+- genuinely similar gesture shapes,
+- inconsistent performer execution,
+- ambiguous timing inside the fixed 90-frame window,
+- possible labeling ambiguity on specific takes.
+
+### Implementation note
+
+- Added `src/analysis/review_confusing_takes.py`.
+- The script builds visual confusion-case comparisons directly from existing run artifacts (`predictions.csv` + `misclassification_analysis/*.csv`).
+- It saves outputs under `<run-dir>/take_review/`, including:
+  - `review_summary.md`
+  - `review_summary.json`
+  - per-case comparison images (`review_case_*.png`)
+  - optional `top_confusions_contact_sheet.png` dashboard
+- Main command shape:
+  - `python -m src.analysis.review_confusing_takes --run-dir models/experiment_runs/<timestamp>/full_mlp`
