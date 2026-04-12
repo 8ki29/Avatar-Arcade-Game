@@ -492,3 +492,24 @@ Current live debug inference still runs one classifier stream, but assignment no
   4. Clear fail-fast error when no JSON appears in time:  
      `OpenPose started but no JSON files appeared in <folder> within <timeout> seconds.`
 - **Takeaway:** The launcher now verifies real frame flow before inference starts, preventing silent zero-frame sessions and making OpenPose-output failures immediately visible.
+
+## Launcher safety correction: OpenPose shutdown policy
+
+The first one-command live launcher implementation used aggressive cleanup:
+
+- it waited for first JSON with a short startup timeout,
+- force-stopped OpenPose if timeout was hit,
+- and force-stopped OpenPose again in `finally` when the classifier exited or Ctrl+C was pressed.
+
+That behavior turned out to be unsafe on at least one real Windows machine, where force-stopping OpenPose can cause system instability/crash risk.
+
+The launcher was therefore changed to **safe-by-default** behavior:
+
+- no automatic OpenPose kill on startup-timeout failure,
+- no automatic OpenPose kill on classifier exit/Ctrl+C,
+- explicit diagnostics are printed when JSON does not appear,
+- OpenPose is intentionally left running for manual inspection/shutdown.
+
+Automatic OpenPose termination is now **opt-in only** via an explicit kill flag.
+
+Current takeaway: for live debugging on heterogeneous Windows setups, manual OpenPose shutdown is the safer default; aggressive process-kill cleanup must be explicit and optional.

@@ -10,8 +10,10 @@ param(
 
     [switch]$KeepJson,
 
-    [ValidateRange(1, 120)]
-    [int]$OpenPoseStartupTimeoutSec = 15
+    [ValidateRange(0, 600)]
+    [int]$OpenPoseStartupTimeoutSec = 60,
+
+    [switch]$KillOpenPoseOnExit
 )
 
 $ErrorActionPreference = "Stop"
@@ -138,10 +140,20 @@ $openposeProcess = Start-Process -FilePath $openposeExe -ArgumentList $openposeA
 
 $firstJsonDetected = $false
 $detectedJsonPath = $null
-$deadline = (Get-Date).AddSeconds($OpenPoseStartupTimeoutSec)
-Write-Host "Waiting for first OpenPose JSON frame in $liveJsonDir (timeout: ${OpenPoseStartupTimeoutSec}s)..." -ForegroundColor Cyan
+$timeoutDisabled = $OpenPoseStartupTimeoutSec -eq 0
+if ($timeoutDisabled) {
+    Write-Host "Waiting for first OpenPose JSON frame in $liveJsonDir (timeout disabled)." -ForegroundColor Cyan
+}
+else {
+    $deadline = (Get-Date).AddSeconds($OpenPoseStartupTimeoutSec)
+    Write-Host "Waiting for first OpenPose JSON frame in $liveJsonDir (timeout: ${OpenPoseStartupTimeoutSec}s)..." -ForegroundColor Cyan
+}
 
-while ((Get-Date) -lt $deadline) {
+while ($true) {
+    if ((-not $timeoutDisabled) -and ((Get-Date) -ge $deadline)) {
+        break
+    }
+
     if ($openposeProcess.HasExited) {
         throw "OpenPose exited early (PID $($openposeProcess.Id), exit code $($openposeProcess.ExitCode)) before producing JSON frames."
     }
@@ -160,10 +172,22 @@ while ((Get-Date) -lt $deadline) {
 }
 
 if (-not $firstJsonDetected) {
-    if ($openposeProcess -and -not $openposeProcess.HasExited) {
-        Stop-Process -Id $openposeProcess.Id -Force -ErrorAction SilentlyContinue
+    $jsonCount = (Get-ChildItem -Path $liveJsonDir -Filter "*.json" -File -ErrorAction SilentlyContinue | Measure-Object).Count
+    Write-Host ""
+    Write-Host "WARNING: No OpenPose JSON detected before startup timeout." -ForegroundColor Yellow
+    Write-Host "  OpenPose EXE: $openposeExe" -ForegroundColor Yellow
+    Write-Host "  OpenPose working dir: $openposeWorkingDir" -ForegroundColor Yellow
+    if ($modelsDir) {
+        Write-Host "  OpenPose model folder: $modelsDir" -ForegroundColor Yellow
     }
-    throw "OpenPose started but no JSON files appeared in $liveJsonDir within $OpenPoseStartupTimeoutSec seconds."
+    else {
+        Write-Host "  OpenPose model folder: <not set>" -ForegroundColor Yellow
+    }
+    Write-Host "  Live JSON dir: $liveJsonDir" -ForegroundColor Yellow
+    Write-Host "  JSON files detected: $jsonCount" -ForegroundColor Yellow
+    Write-Host "OpenPose was intentionally left running for manual inspection." -ForegroundColor Yellow
+    Write-Host "Close the OpenPose window/process manually when you are done debugging." -ForegroundColor Yellow
+    exit 1
 }
 
 Write-Host "First OpenPose JSON detected: $detectedJsonPath" -ForegroundColor Green
@@ -180,7 +204,13 @@ if (-not $NoQuietWarmup) {
 }
 
 Write-Host "Starting classifier..." -ForegroundColor Cyan
-Write-Host "Press Ctrl+C in this terminal to stop both processes." -ForegroundColor Cyan
+Write-Host "Press Ctrl+C in this terminal to stop the classifier." -ForegroundColor Cyan
+if ($KillOpenPoseOnExit) {
+    Write-Host "OpenPose auto-cleanup is ENABLED for this run (-KillOpenPoseOnExit)." -ForegroundColor Yellow
+}
+else {
+    Write-Host "OpenPose auto-cleanup is DISABLED by default for machine safety; close OpenPose manually when done." -ForegroundColor Yellow
+}
 Write-Host ""
 
 try {
@@ -188,8 +218,13 @@ try {
 }
 finally {
     if ($openposeProcess -and -not $openposeProcess.HasExited) {
-        Write-Host "Stopping OpenPose (PID $($openposeProcess.Id))..." -ForegroundColor Yellow
-        Stop-Process -Id $openposeProcess.Id -Force -ErrorAction SilentlyContinue
+        if ($KillOpenPoseOnExit) {
+            Write-Host "Stopping OpenPose (PID $($openposeProcess.Id)) because -KillOpenPoseOnExit was set..." -ForegroundColor Yellow
+            Stop-Process -Id $openposeProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host "OpenPose is still running (PID $($openposeProcess.Id)). Close it manually when finished." -ForegroundColor Yellow
+        }
     }
 
     Write-Host ""
