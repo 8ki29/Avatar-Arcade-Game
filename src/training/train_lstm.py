@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -396,7 +398,49 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Always regenerate train/val/test split indices and overwrite saved split files.",
     )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default="",
+        help=(
+            "Optional descriptive run name stored in config/metrics outputs. "
+            "Does not change behavior when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default="",
+        help=(
+            "Optional output folder for this run. When provided, training artifacts are written "
+            "inside that folder instead of default models/reports + models/checkpoints paths."
+        ),
+    )
+    parser.add_argument(
+        "--save-split-copy",
+        action="store_true",
+        help=(
+            "When used with --run-dir in full-dataset mode, copy train/val/test split index files "
+            "into <run-dir>/splits for experiment tracking."
+        ),
+    )
     return parser.parse_args()
+
+
+def compute_label_distribution(y_values: np.ndarray, label_map: dict[str, Any]) -> dict[str, int]:
+    """Build a JSON-friendly class-count mapping using label names."""
+    id_to_name = {int(v): k for k, v in label_map.get("label_to_id", {}).items()}
+    unique_classes, class_counts = np.unique(y_values, return_counts=True)
+    distribution: dict[str, int] = {}
+    for class_id, count in zip(unique_classes, class_counts):
+        class_name = id_to_name.get(int(class_id), f"class_{int(class_id)}")
+        distribution[class_name] = int(count)
+    return distribution
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write pretty JSON to disk with stable key ordering."""
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def save_test_reports(
@@ -425,6 +469,18 @@ def save_test_reports(
     cm = confusion_matrix(y_test, y_pred, labels=labels_sorted)
     cm_df = pd.DataFrame(cm, index=target_names, columns=target_names)
     cm_df.to_csv(reports_dir / f"{filename_prefix}confusion_matrix.csv")
+    plt.figure(figsize=(8, 6))
+    plt.imshow(cm, interpolation="nearest", cmap="Blues")
+    plt.title("Confusion Matrix")
+    plt.colorbar()
+    tick_positions = np.arange(len(target_names))
+    plt.xticks(tick_positions, target_names, rotation=45, ha="right")
+    plt.yticks(tick_positions, target_names)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.tight_layout()
+    plt.savefig(reports_dir / f"{filename_prefix}confusion_matrix.png", dpi=150)
+    plt.close()
 
     predictions_df = pd.DataFrame(
         {
@@ -587,10 +643,19 @@ def main() -> None:
 
     processed_dir = Path("data/processed")
     splits_dir = Path("data/splits")
-    checkpoints_dir = Path("models/checkpoints")
-    reports_dir = Path("models/reports")
+    default_checkpoints_dir = Path("models/checkpoints")
+    default_reports_dir = Path("models/reports")
+    run_dir = Path(args.run_dir).expanduser().resolve() if args.run_dir else None
+    run_name = args.run_name.strip() if args.run_name else ""
 
     splits_dir.mkdir(parents=True, exist_ok=True)
+    if run_dir is None:
+        checkpoints_dir = default_checkpoints_dir
+        reports_dir = default_reports_dir
+    else:
+        checkpoints_dir = run_dir / "checkpoints"
+        reports_dir = run_dir
+        run_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -599,6 +664,22 @@ def main() -> None:
 
     if x.ndim != 3:
         raise ValueError(f"Expected X shape (samples, timesteps, features), got {x.shape}")
+
+    config_snapshot = {
+        "run_name": run_name if run_name else None,
+        "run_dir": str(run_dir) if run_dir is not None else None,
+        "argv": sys.argv,
+        "args": vars(args),
+        "random_seed": random_seed,
+        "training_config": config.get("training", {}),
+        "processed_dir": str(processed_dir),
+        "splits_dir": str(splits_dir),
+        "checkpoints_dir": str(checkpoints_dir),
+        "reports_dir": str(reports_dir),
+        "dataset_shape": list(x.shape),
+        "label_distribution": compute_label_distribution(y, label_map),
+    }
+    write_json(reports_dir / "config.json", config_snapshot)
 
     if args.tiny_overfit:
         print("\n=== Tiny Overfit Diagnostic Mode (enabled) ===")
@@ -702,6 +783,24 @@ def main() -> None:
             f"- Tiny history plot: "
             f"{reports_dir / f'tiny_overfit_{args.tiny_model_type}_history.png'}"
         )
+
+        tiny_metrics = {
+            "status": "success",
+            "run_name": run_name if run_name else None,
+            "tiny_overfit": True,
+            "tiny_model_type": args.tiny_model_type,
+            "model_type": args.model_type,
+            "dataset_shape": list(x.shape),
+            "tiny_subset_shape": {"x": list(x_tiny.shape), "y": list(y_tiny.shape)},
+            "tiny_subset_distribution": compute_label_distribution(y_tiny, label_map),
+            "epochs_requested": tiny_epochs,
+            "epochs_run": len(history.history.get("loss", [])),
+            "final_train_accuracy": final_train_acc,
+            "final_train_loss": final_train_loss,
+            "history_csv": str(reports_dir / f"tiny_overfit_{args.tiny_model_type}_history.csv"),
+            "history_png": str(reports_dir / f"tiny_overfit_{args.tiny_model_type}_history.png"),
+        }
+        write_json(reports_dir / "metrics.json", tiny_metrics)
         return
 
     print("\n=== Full Dataset Training Mode ===")
@@ -726,6 +825,19 @@ def main() -> None:
     print_split_summary("Train", y_train, label_map)
     print_split_summary("Validation", y_val, label_map)
     print_split_summary("Test", y_test, label_map)
+    split_copy_paths: dict[str, str] = {}
+    if args.save_split_copy and run_dir is not None:
+        split_copy_dir = run_dir / "splits"
+        split_copy_dir.mkdir(parents=True, exist_ok=True)
+        source_split_paths = {
+            "train": splits_dir / "train_indices.npy",
+            "val": splits_dir / "val_indices.npy",
+            "test": splits_dir / "test_indices.npy",
+        }
+        for split_name, src_path in source_split_paths.items():
+            dst_path = split_copy_dir / src_path.name
+            shutil.copy2(src_path, dst_path)
+            split_copy_paths[split_name] = str(dst_path)
 
     if args.model_type == "lstm":
         epochs = int(get_training_value(config, "epochs", 20))
@@ -954,8 +1066,46 @@ def main() -> None:
     print(f"- Training history plot: {reports_dir / f'{filename_prefix}training_history.png'}")
     print(f"- Classification report: {reports_dir / f'{filename_prefix}classification_report.txt'}")
     print(f"- Confusion matrix CSV: {reports_dir / f'{filename_prefix}confusion_matrix.csv'}")
+    print(f"- Confusion matrix PNG: {reports_dir / f'{filename_prefix}confusion_matrix.png'}")
     print(f"- Test predictions CSV: {reports_dir / f'{filename_prefix}test_predictions.csv'}")
     print(f"- Split indices: {splits_dir / 'train_indices.npy'}, {splits_dir / 'val_indices.npy'}, {splits_dir / 'test_indices.npy'}")
+    if split_copy_paths:
+        print(f"- Split copy dir: {run_dir / 'splits'}")
+
+    metrics_payload = {
+        "status": "success",
+        "run_name": run_name if run_name else None,
+        "tiny_overfit": False,
+        "model_type": args.model_type,
+        "dataset_shape": list(x.shape),
+        "split_sizes": {
+            "train": int(len(train_idx)),
+            "val": int(len(val_idx)),
+            "test": int(len(test_idx)),
+        },
+        "split_label_distribution": {
+            "train": compute_label_distribution(y_train, label_map),
+            "val": compute_label_distribution(y_val, label_map),
+            "test": compute_label_distribution(y_test, label_map),
+        },
+        "epochs_requested": int(epochs),
+        "epochs_run": int(epochs_ran),
+        "final_train_accuracy": float(history.history.get("accuracy", [np.nan])[-1]),
+        "final_val_accuracy": float(val_acc),
+        "final_test_accuracy": float(test_acc),
+        "final_train_loss": float(history.history.get("loss", [np.nan])[-1]),
+        "final_val_loss": float(val_loss),
+        "final_test_loss": float(test_loss),
+        "best_checkpoint_path": str(checkpoint_path),
+        "history_csv": str(reports_dir / f"{filename_prefix}training_history.csv"),
+        "history_png": str(reports_dir / f"{filename_prefix}training_history.png"),
+        "classification_report": str(reports_dir / f"{filename_prefix}classification_report.txt"),
+        "confusion_matrix_csv": str(reports_dir / f"{filename_prefix}confusion_matrix.csv"),
+        "confusion_matrix_png": str(reports_dir / f"{filename_prefix}confusion_matrix.png"),
+        "predictions_csv": str(reports_dir / f"{filename_prefix}test_predictions.csv"),
+        "split_copy_paths": split_copy_paths,
+    }
+    write_json(reports_dir / "metrics.json", metrics_payload)
 
 
 if __name__ == "__main__":
