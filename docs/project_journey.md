@@ -479,3 +479,16 @@ Current live debug inference still runs one classifier stream, but assignment no
 - **Observed:** The minimal setup is a one-time local config copy/edit plus one launcher command from repo root.
 - **Changed:** README now documents the exact config file to edit and the launcher command shape.
 - **Takeaway:** Onboarding to live OpenPose + classifier testing is now short, repeatable, and report-ready.
+
+## Live-launcher reliability fix: no-frame startup failure (`frames_total=0`)
+
+- **First attempt behavior:** The one-command launcher appeared to start OpenPose and then start the classifier, but session summaries could end with `frames_total=0`, `warmup=0`, `inference=0`.
+- **Failure symptom meaning:** The classifier itself was alive, but no live JSON frame files were arriving in the configured `live_json_dir`.
+- **Diagnosis:** This was an integration/startup issue (launcher/OpenPose output path handling), not a model/classifier-learning issue.
+- **Fix implemented:**
+  1. Explicit OpenPose process working directory (defaulting to the executable's parent directory, with optional local override).
+  2. Startup handshake that waits for the first JSON file in `live_json_dir` (timeout-based) before starting classifier inference.
+  3. Stronger startup diagnostics: resolved executable path, working directory, model folder, JSON output directory, and pre-launch JSON state.
+  4. Clear fail-fast error when no JSON appears in time:  
+     `OpenPose started but no JSON files appeared in <folder> within <timeout> seconds.`
+- **Takeaway:** The launcher now verifies real frame flow before inference starts, preventing silent zero-frame sessions and making OpenPose-output failures immediately visible.
