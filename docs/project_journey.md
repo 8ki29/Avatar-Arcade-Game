@@ -154,3 +154,36 @@ To answer that cleanly, the next round compares:
 - If `mlp_motion` beats `full_mlp`, then motion features themselves are useful even without recurrence.
 - If `mlp_motion` does not improve but `gru_motion` (or `lstm_motion` with val-accuracy checkpointing) improves, recurrence may be extracting meaningful temporal structure.
 - If neither motion MLP nor motion recurrent models beat `full_mlp`, the flattened pose baseline remains the practical best model for now.
+
+## Error analysis phase: inspecting full_mlp misclassifications
+
+At this stage, the project direction shifts from architecture exploration to targeted error inspection.
+The practical baseline conclusion is unchanged: **full_mlp remains the strongest model** on the corrected full dataset.
+Motion follow-up experiments (including motion-feature MLP and recurrent motion variants) did not surpass full_mlp in a way that changes that baseline decision.
+
+Because of that, the next logical step is not to replace the baseline, but to understand its remaining mistakes in more detail.
+This error-analysis phase is intended to answer whether residual errors are mostly caused by:
+
+- genuinely similar gesture patterns (for example, same-element attack vs defense overlap),
+- label ambiguity in some takes,
+- inconsistent performance concentrated in certain people/sessions/takes,
+- preprocessing or normalization artifacts,
+- timing misalignment inside fixed 90-frame windows.
+
+### Error analysis implementation artifacts added
+
+- `src/analysis/analyze_misclassifications.py`
+  - New CLI workflow to analyze one completed run folder and produce machine-readable + human-readable reports.
+  - Main entrypoint stays simple: `python -m src.analysis.analyze_misclassifications --run-dir <run-folder>`.
+  - Convenience run targeting includes `--suite-dir` and `--latest-suite-dir` (defaulting to `full_mlp`).
+- Per-run analysis outputs under `<run-dir>/misclassification_analysis/`:
+  - `summary.json`, `summary.md`
+  - `confusions_by_pair.csv`
+  - `misclassified_samples.csv`
+  - `highest_confidence_errors.csv`
+  - `hardest_correct_samples.csv`
+  - simple error-visualization plots when data is available.
+- Richer training prediction export support in `train_lstm.py`:
+  - Writes run-local `predictions.csv` (in addition to backward-compatible `*_test_predictions.csv`),
+  - includes sample index, true/pred labels, confidence fields, per-class probabilities,
+  - joins preprocessing metadata fields (`gesture`, `person`, `session`, `take`, `sample_path`) when available for take-level traceability.
