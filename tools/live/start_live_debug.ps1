@@ -8,7 +8,10 @@ param(
 
     [switch]$NoQuietWarmup,
 
-    [switch]$KeepJson
+    [switch]$KeepJson,
+
+    [ValidateRange(1, 120)]
+    [int]$OpenPoseStartupTimeoutSec = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,6 +64,14 @@ $openposeExe = Resolve-ConfigPath -PathValue $config.openpose_demo_exe -BaseDir 
 if (-not $openposeExe) {
     throw "openpose_demo_exe is required in $configPath"
 }
+
+$openposeWorkingDir = Resolve-ConfigPath -PathValue $config.openpose_working_dir -BaseDir $repoRoot
+if (-not $openposeWorkingDir) {
+    $openposeWorkingDir = Split-Path -Parent $openposeExe
+}
+if (-not (Test-Path -Path $openposeWorkingDir -PathType Container)) {
+    throw "OpenPose working directory not found: $openposeWorkingDir"
+}
 if (-not (Test-Path -Path $openposeExe -PathType Leaf)) {
     throw "OpenPose executable not found: $openposeExe"
 }
@@ -80,6 +91,7 @@ New-Item -ItemType Directory -Path $liveJsonDir -Force | Out-Null
 if (-not $KeepJson) {
     Get-ChildItem -Path $liveJsonDir -Filter "*.json" -File -ErrorAction SilentlyContinue | Remove-Item -Force
 }
+$preexistingJsonCount = (Get-ChildItem -Path $liveJsonDir -Filter "*.json" -File -ErrorAction SilentlyContinue | Measure-Object).Count
 
 $pythonModuleCheck = python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('src.inference.live_openpose_debug') else 1)"
 if ($LASTEXITCODE -ne 0) {
@@ -111,11 +123,50 @@ if ($null -ne $config.openpose_camera -and "$($config.openpose_camera)" -ne "") 
 }
 
 Write-Host "Starting OpenPose..." -ForegroundColor Cyan
-Write-Host "  EXE: $openposeExe"
-Write-Host "  JSON output: $liveJsonDir"
+Write-Host "  OpenPose EXE: $openposeExe"
+Write-Host "  OpenPose working dir: $openposeWorkingDir"
+if ($modelsDir) {
+    Write-Host "  OpenPose model folder: $modelsDir"
+}
+else {
+    Write-Host "  OpenPose model folder: <not set>"
+}
+Write-Host "  Live JSON dir: $liveJsonDir"
+Write-Host "  Live JSON pre-launch file count: $preexistingJsonCount"
 
-$openposeProcess = Start-Process -FilePath $openposeExe -ArgumentList $openposeArgs -PassThru
-Start-Sleep -Milliseconds 800
+$openposeProcess = Start-Process -FilePath $openposeExe -ArgumentList $openposeArgs -WorkingDirectory $openposeWorkingDir -PassThru
+
+$firstJsonDetected = $false
+$detectedJsonPath = $null
+$deadline = (Get-Date).AddSeconds($OpenPoseStartupTimeoutSec)
+Write-Host "Waiting for first OpenPose JSON frame in $liveJsonDir (timeout: ${OpenPoseStartupTimeoutSec}s)..." -ForegroundColor Cyan
+
+while ((Get-Date) -lt $deadline) {
+    if ($openposeProcess.HasExited) {
+        throw "OpenPose exited early (PID $($openposeProcess.Id), exit code $($openposeProcess.ExitCode)) before producing JSON frames."
+    }
+
+    $firstJson = Get-ChildItem -Path $liveJsonDir -Filter "*.json" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime |
+        Select-Object -First 1
+
+    if ($firstJson) {
+        $firstJsonDetected = $true
+        $detectedJsonPath = $firstJson.FullName
+        break
+    }
+
+    Start-Sleep -Milliseconds 250
+}
+
+if (-not $firstJsonDetected) {
+    if ($openposeProcess -and -not $openposeProcess.HasExited) {
+        Stop-Process -Id $openposeProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+    throw "OpenPose started but no JSON files appeared in $liveJsonDir within $OpenPoseStartupTimeoutSec seconds."
+}
+
+Write-Host "First OpenPose JSON detected: $detectedJsonPath" -ForegroundColor Green
 
 $classifierArgs = @(
     "-m", "src.inference.live_openpose_debug",

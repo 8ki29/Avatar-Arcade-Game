@@ -4,6 +4,10 @@
 # Required: full path to your external OpenPoseDemo.exe (repo does not bundle OpenPose binaries)
 openpose_demo_exe: "C:/openpose/bin/OpenPoseDemo.exe"
 
+# Optional: explicit working directory for OpenPoseDemo.exe.
+# If blank, launcher uses the executable's parent directory.
+# openpose_working_dir: "C:/openpose/bin"
+
 # Optional: OpenPose model folder path. If blank, launcher will not pass --model_folder.
 openpose_models_dir: "C:/openpose/models"
 
