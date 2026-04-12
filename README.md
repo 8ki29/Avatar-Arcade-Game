@@ -171,3 +171,41 @@ Main outputs are saved to:
 - `data/splits/train_indices.npy`
 - `data/splits/val_indices.npy`
 - `data/splits/test_indices.npy`
+
+## Experiment suite runner (reproducible multi-run tracking)
+
+Run the full predefined suite (recommended):
+
+```bash
+python -m src.training.run_experiment_suite --suite all --force-resplit
+```
+
+What it does:
+
+- Runs each experiment as an isolated subprocess call to `python -m src.training.train_lstm`.
+- Stores each run in its own folder under a timestamped suite directory.
+- Continues the suite even if one experiment fails.
+- Produces suite-level machine-readable and Markdown summaries.
+
+Output location pattern:
+
+- Suite root: `models/experiment_runs/YYYYMMDD_HHMMSS/`
+- Per-experiment folders: `full_mlp/`, `full_lstm/`, `full_lstm_motion/`, `tiny_overfit_lstm/`, `tiny_overfit_mlp/`
+- Suite summary files:
+  - `suite_manifest.json`
+  - `experiment_summary.csv`
+  - `experiment_summary.json`
+  - `experiment_summary.md`
+
+Per-experiment artifacts now include run-local files such as:
+
+- `console.log`
+- `stderr.log`
+- `command.txt`
+- `config.json`
+- `metrics.json`
+- training history and confusion matrix files supported by the selected model mode
+
+Project journey document for report writing:
+
+- `docs/project_journey.md`
