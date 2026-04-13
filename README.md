@@ -107,31 +107,58 @@ What the launcher does:
 - optional automatic cleanup is opt-in only via `-KillOpenPoseOnExit`
 - supports safer startup timing via `-OpenPoseStartupTimeoutSec 60` (default) or `-OpenPoseStartupTimeoutSec 0` to wait indefinitely
 
-## Manual live/replay debug with intended label + confidence summary
+## Safer manual live-recording workflow (fresh folder per run)
 
-When launcher automation is unreliable, use the manual 2-step debug flow:
+To avoid stale JSON contamination between runs, do **not** reuse one shared folder like `live_test` for repeated manual recordings.
 
-1. Record OpenPose JSON frames into a folder (live run or replay export).
-2. Run the debug classifier with an intended gesture tag for that run:
-   ```bash
-   python -m src.inference.live_openpose_debug \
-     --json-dir data/raw/live_buffer/openpose_session/live_test \
-     --model-path models/checkpoints/best_mlp.keras \
-     --intended-label defense_fire
+Use this safer 3-step flow:
+
+1. Create a fresh per-recording folder first:
+   ```powershell
+   .\tools\live\new_live_capture_session.ps1 -IntendedLabel attack_earth
    ```
-   - `--intended-label` is optional.
-   - If provided, the value is written to every row in the output CSV log as `intended_label`.
-3. Summarize confidence behavior from the generated CSV:
-   ```bash
-   python -m src.analysis.analyze_live_debug_confidence \
-     --csv logs/inference/live_debug_YYYYMMDD_HHMMSS.csv
-   ```
-   Optional thresholds:
-   ```bash
-   python -m src.analysis.analyze_live_debug_confidence \
-     --csv logs/inference/live_debug_YYYYMMDD_HHMMSS.csv \
-     --thresholds 0.50 0.70 0.80 0.90
-   ```
+   This creates a folder like:
+   - `data/raw/live_buffer/openpose_session/live_attack_earth_20260412_220500`
+2. Record OpenPose JSON into that exact folder (the helper prints a command template).
+3. Replay/analyze that exact folder with `live_openpose_debug` (the helper prints this too), then run confidence analysis on the produced CSV.
+
+Why this matters:
+
+- Fresh per-recording folders prevent old JSON frames from earlier runs from being mixed into new runs.
+- This protects replay/inference interpretation from stale-session contamination.
+
+### Manual replay with intended label + confidence summary
+
+Replay command shape:
+
+```bash
+python -m src.inference.live_openpose_debug \
+  --json-dir data/raw/live_buffer/openpose_session/live_attack_earth_20260412_220500 \
+  --model-path models/checkpoints/best_mlp.keras \
+  --tracking-mode single_person \
+  --print-every-n 10 \
+  --quiet-warmup \
+  --max-idle-polls 40 \
+  --intended-label attack_earth
+```
+
+- `--intended-label` is optional.
+- If provided, the value is written to every CSV row as `intended_label`.
+
+Confidence summary command:
+
+```bash
+python -m src.analysis.analyze_live_debug_confidence \
+  --csv logs/inference/live_debug_YYYYMMDD_HHMMSS.csv
+```
+
+Optional thresholds:
+
+```bash
+python -m src.analysis.analyze_live_debug_confidence \
+  --csv logs/inference/live_debug_YYYYMMDD_HHMMSS.csv \
+  --thresholds 0.50 0.70 0.80 0.90
+```
 
 The analysis writes `<csv_stem>_confidence_summary.json` next to the CSV and prints a concise threshold/confusion-oriented summary in the terminal.
 

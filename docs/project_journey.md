@@ -545,3 +545,35 @@ To make threshold design evidence-driven, we added explicit run-level intended-l
 ### Current takeaway
 
 We now have practical tooling to evaluate confidence behavior systematically per debug run, which is a concrete step toward a safe abstain/threshold policy for final game integration. The immediate next step is to run repeated intended-label sessions per gesture and compare retained-vs-abstained frame rates under candidate thresholds (for example 0.70, 0.80, 0.90).
+
+## Live debug workflow hardening: stale JSON contamination fix
+
+During manual live debugging, multiple runs were accidentally recorded into the same folder:
+`data/raw/live_buffer/openpose_session/live_test`.
+That introduced stale JSON contamination across runs.
+
+### What was attempted and why
+
+- Reviewed the manual 2-step live workflow (record with OpenPose, then replay with `live_openpose_debug`) to identify where cross-run state could leak.
+- Prioritized workflow safety and traceability rather than classifier/model changes, because the observed failure mode was data-mixing, not a training/inference architecture bug.
+
+### What was observed
+
+- A later `defense_fire` replay reproduced the same later-frame predictions/confidences seen in an earlier `attack_earth` replay.
+- The most likely cause was leftover frame JSON from the earlier run still present in the shared `live_test` folder.
+
+### What changed
+
+- Added a dedicated helper: `tools/live/new_live_capture_session.ps1`.
+- The helper creates a fresh per-recording folder under `data/raw/live_buffer/openpose_session/` with naming:
+  - `live_<intended-or-unknown>_<timestamp>`
+- It also prints human-ready next commands for:
+  - OpenPose recording into the new folder,
+  - replay with `python -m src.inference.live_openpose_debug`,
+  - confidence summary analysis command shape.
+- Updated `README.md` to document the safer manual flow and explicitly explain stale-JSON contamination risk.
+
+### Current takeaway
+
+The reliable live debugging path remains manual, but each recording must use a new session folder.
+Fresh per-run directories eliminate stale-file carryover and make replay/confidence interpretation trustworthy again.
