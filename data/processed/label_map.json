@@ -1,0 +1,25 @@
+{
+  "target_mode": "9_gestures_with_idle",
+  "label_to_id": {
+    "attack_air": 0,
+    "defense_air": 1,
+    "attack_fire": 2,
+    "defense_fire": 3,
+    "attack_water": 4,
+    "defense_water": 5,
+    "attack_earth": 6,
+    "defense_earth": 7,
+    "idle": 8
+  },
+  "id_to_label": {
+    "0": "attack_air",
+    "1": "defense_air",
+    "2": "attack_fire",
+    "3": "defense_fire",
+    "4": "attack_water",
+    "5": "defense_water",
+    "6": "attack_earth",
+    "7": "defense_earth",
+    "8": "idle"
+  }
+}
