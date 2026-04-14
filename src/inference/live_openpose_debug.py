@@ -13,6 +13,7 @@ import csv
 import json
 import time
 from collections import Counter, deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import ceil
 from pathlib import Path
@@ -243,6 +244,18 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Require motion_active for non-idle ACCEPT decisions (default: enabled).",
+    )
+    parser.add_argument(
+        "--output-latest-json",
+        type=str,
+        default="",
+        help="Optional path to write latest per-frame prediction JSON (overwritten each inference step).",
+    )
+    parser.add_argument(
+        "--output-jsonl",
+        type=str,
+        default="",
+        help="Optional path to append per-frame prediction JSON objects (JSONL).",
     )
     return parser.parse_args()
 
@@ -553,6 +566,54 @@ def draw_window_overlay(
     cv2.waitKey(1)
 
 
+def build_safe_player_payload(*, tracked: bool, person_index: int | None) -> dict[str, Any]:
+    return {
+        "tracked": bool(tracked),
+        "person_index": person_index,
+        "raw_label": "idle",
+        "smoothed_label": "idle",
+        "decision_status": "NO_ACTION",
+        "decision_label": "NO_ACTION",
+        "final_action_status": "NO_TRIGGER",
+        "final_action_label": "",
+        "motion_active": False,
+        "top1_prob": 0.0,
+    }
+
+
+@dataclass
+class PlayerRuntimeState:
+    rolling: deque[np.ndarray]
+    motion_flags: deque[bool]
+    ema_probs: np.ndarray | None = None
+    estimated_live_fps: float = 0.0
+    prev_frame_ts: float | None = None
+    instantaneous_live_fps: float | None = None
+    motion_score_smoothed: float = 0.0
+    motion_active: bool = False
+    motion_on_run: int = 0
+    current_accept_streak: int = 0
+    current_accept_label: str = ""
+    current_cooldown_remaining: int = 0
+    trigger_locked: bool = False
+    release_counter: int = 0
+    inference_frames: int = 0
+    decision_status_counts: Counter[str] = field(default_factory=Counter)
+    decision_label_counts: Counter[str] = field(default_factory=Counter)
+    final_action_status_counts: Counter[str] = field(default_factory=Counter)
+    final_action_label_counts: Counter[str] = field(default_factory=Counter)
+    trigger_counts_by_label: Counter[str] = field(default_factory=Counter)
+    raw_class_counts: Counter[str] = field(default_factory=Counter)
+    smoothed_class_counts: Counter[str] = field(default_factory=Counter)
+    raw_smoothed_disagreements: Counter[str] = field(default_factory=Counter)
+    fps_sum: float = 0.0
+    fps_count: int = 0
+    fps_min_seen: float | None = None
+    fps_max_seen: float | None = None
+    total_triggers: int = 0
+    trigger_lock_was_off_count: int = 0
+
+
 def main() -> None:
     args = parse_args()
     overlay_mode = normalize_overlay_mode(args)
@@ -636,9 +697,29 @@ def main() -> None:
     motion_score_smoothed = 0.0
     motion_active = False
     motion_on_run = 0
+    player_states: dict[str, PlayerRuntimeState] = {}
+    if args.tracking_mode == "two_player_left_right":
+        player_states = {
+            "left": PlayerRuntimeState(
+                rolling=deque(maxlen=rolling_capacity),
+                motion_flags=deque(maxlen=rolling_capacity),
+                estimated_live_fps=live_source_fps,
+            ),
+            "right": PlayerRuntimeState(
+                rolling=deque(maxlen=rolling_capacity),
+                motion_flags=deque(maxlen=rolling_capacity),
+                estimated_live_fps=live_source_fps,
+            ),
+        }
     seen_files: set[str] = set()
     print_every_n = max(1, int(args.print_every_n))
     summary_path = summary_path_from_csv(log_csv_path)
+    latest_json_path = Path(args.output_latest_json).expanduser().resolve() if args.output_latest_json else None
+    jsonl_path = Path(args.output_jsonl).expanduser().resolve() if args.output_jsonl else None
+    if latest_json_path is not None:
+        latest_json_path.parent.mkdir(parents=True, exist_ok=True)
+    if jsonl_path is not None:
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
     log_csv_path.parent.mkdir(parents=True, exist_ok=True)
     csv_file = log_csv_path.open("w", encoding="utf-8", newline="")
@@ -647,6 +728,8 @@ def main() -> None:
         fieldnames=[
             "timestamp_utc",
             "frame_file",
+            "player_side",
+            "player_tracked",
             "buffer_fill",
             "raw_prediction",
             "smoothed_prediction",
@@ -714,6 +797,8 @@ def main() -> None:
     print(f"Label map: {label_map_path}")
     print(f"CSV log: {log_csv_path}")
     print(f"Summary: {summary_path}")
+    print(f"Latest JSON output: {latest_json_path if latest_json_path is not None else '(disabled)'}")
+    print(f"JSONL output: {jsonl_path if jsonl_path is not None else '(disabled)'}")
     print(f"Tracking mode: {args.tracking_mode}")
     effective_overlay_mode = overlay_mode
     if overlay_mode in {"window", "both"} and cv2 is None:
@@ -818,6 +903,363 @@ def main() -> None:
                 if frame_result.suspicious_jump:
                     suspicious_frames += 1
 
+                if args.tracking_mode == "two_player_left_right":
+                    side_candidates: dict[str, tuple[np.ndarray, bool, int | None]] = {
+                        "left": (
+                            frame_result.left_features_30
+                            if frame_result.left_features_30 is not None
+                            else frame_result.features_30,
+                            bool(frame_result.left_tracked),
+                            frame_result.selected_left_person_index,
+                        ),
+                        "right": (
+                            frame_result.right_features_30
+                            if frame_result.right_features_30 is not None
+                            else frame_result.features_30,
+                            bool(frame_result.right_tracked),
+                            frame_result.selected_right_person_index,
+                        ),
+                    }
+                    players_payload: dict[str, dict[str, Any]] = {}
+                    for side, (side_features, side_tracked, side_person_index) in side_candidates.items():
+                        state = player_states[side]
+                        now_ts = time.perf_counter()
+                        if args.auto_live_fps:
+                            state.estimated_live_fps, state.instantaneous_live_fps = update_estimated_live_fps(
+                                now_ts=now_ts,
+                                prev_ts=state.prev_frame_ts,
+                                prev_fps=state.estimated_live_fps,
+                                ema_alpha=float(args.fps_ema_alpha),
+                                min_fps=float(args.min_live_fps),
+                                max_fps=float(args.max_live_fps),
+                            )
+                        else:
+                            state.instantaneous_live_fps = None
+                            state.estimated_live_fps = live_source_fps
+                        state.prev_frame_ts = now_ts
+                        state.fps_sum += state.estimated_live_fps
+                        state.fps_count += 1
+                        state.fps_min_seen = (
+                            state.estimated_live_fps
+                            if state.fps_min_seen is None
+                            else min(state.fps_min_seen, state.estimated_live_fps)
+                        )
+                        state.fps_max_seen = (
+                            state.estimated_live_fps
+                            if state.fps_max_seen is None
+                            else max(state.fps_max_seen, state.estimated_live_fps)
+                        )
+
+                        state.rolling.append(side_features)
+                        fill = len(state.rolling)
+                        live_source_window_frames_current = source_window_frames_for_target_span(
+                            target_sequence_length=TARGET_SEQUENCE_LENGTH,
+                            source_nominal_fps=state.estimated_live_fps,
+                            target_fps=TARGET_FPS,
+                        )
+                        prev_features = state.rolling[-2] if len(state.rolling) >= 2 else state.rolling[-1]
+                        motion_score_raw = float(np.mean(np.abs(state.rolling[-1] - prev_features)))
+                        state.motion_score_smoothed = (
+                            (float(args.motion_ema_alpha) * state.motion_score_smoothed)
+                            + ((1.0 - float(args.motion_ema_alpha)) * motion_score_raw)
+                        )
+                        if state.motion_active:
+                            if state.motion_score_smoothed <= args.motion_threshold_off:
+                                state.motion_active = False
+                                state.motion_on_run = 0
+                        else:
+                            if state.motion_score_smoothed >= args.motion_threshold_on:
+                                state.motion_on_run += 1
+                                if state.motion_on_run >= args.motion_on_min_consecutive:
+                                    state.motion_active = True
+                                    state.motion_on_run = 0
+                            else:
+                                state.motion_on_run = 0
+                        state.motion_flags.append(bool(state.motion_active))
+
+                        if fill < live_source_window_frames_current:
+                            warmup_frames += 1
+                            payload = build_safe_player_payload(tracked=side_tracked, person_index=side_person_index)
+                            payload["motion_active"] = bool(state.motion_active)
+                            players_payload[side] = payload
+                            writer.writerow(
+                                {
+                                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                    "frame_file": frame_path.name,
+                                    "player_side": side,
+                                    "player_tracked": int(side_tracked),
+                                    "buffer_fill": f"{fill}/{live_source_window_frames_current}",
+                                    "raw_prediction": "",
+                                    "smoothed_prediction": "",
+                                    "top1_label": "",
+                                    "top1_prob": "",
+                                    "top2_label": "",
+                                    "top2_prob": "",
+                                    "top3_label": "",
+                                    "top3_prob": "",
+                                    "had_joint_repair": int(frame_result.had_joint_repair),
+                                    "repaired_frame": int(frame_result.was_repaired_frame),
+                                    "used_prev_frame_copy": int(frame_result.used_prev_frame_copy),
+                                    "suspicious_jump": int(frame_result.suspicious_jump),
+                                    "missing_joint_count": missing_joints,
+                                    "detected_people_count": frame_result.detected_people_count,
+                                    "tracking_mode": frame_result.tracking_mode,
+                                    "selected_person_index": frame_result.selected_person_index,
+                                    "selected_left_person_index": frame_result.selected_left_person_index,
+                                    "selected_right_person_index": frame_result.selected_right_person_index,
+                                    "tracking_note": frame_result.tracking_note,
+                                    "intended_label": intended_label,
+                                    "top1_margin": "",
+                                    "smoothed_top1_label": "",
+                                    "smoothed_top1_prob": "",
+                                    "smoothed_top2_label": "",
+                                    "smoothed_top2_prob": "",
+                                    "smoothed_top1_margin": "",
+                                    "decision_source": "warmup",
+                                    "decision_label": "",
+                                    "decision_status": "",
+                                    "accept_threshold": args.accept_threshold,
+                                    "margin_threshold": args.margin_threshold,
+                                    "trigger_streak_required": args.trigger_streak,
+                                    "current_accept_streak": 0,
+                                    "trigger_cooldown_frames": args.trigger_cooldown_frames,
+                                    "current_cooldown_remaining": 0,
+                                    "final_action_status": "",
+                                    "final_action_label": "",
+                                    "trigger_locked": 0,
+                                    "release_counter": 0,
+                                    "reset_counter": 0,
+                                    "trigger_lock_was_off": "",
+                                    "overlay_mode": effective_overlay_mode,
+                                    "release_idle_frames": args.release_idle_frames,
+                                    "auto_live_fps_enabled": int(args.auto_live_fps),
+                                    "estimated_live_fps": state.estimated_live_fps,
+                                    "instantaneous_live_fps": "" if state.instantaneous_live_fps is None else state.instantaneous_live_fps,
+                                    "live_source_fps": live_source_fps,
+                                    "live_source_window_frames": max_source_window_frames,
+                                    "live_source_window_frames_current": live_source_window_frames_current,
+                                    "motion_score_raw": motion_score_raw,
+                                    "motion_score_smoothed": state.motion_score_smoothed,
+                                    "motion_active": int(state.motion_active),
+                                    "active_span_start_index": "",
+                                    "active_span_end_index": "",
+                                    "active_span_length_frames": 0,
+                                    "classifier_input_source_mode": "warmup",
+                                }
+                            )
+                            continue
+
+                        active_window, active_meta = build_live_active_span_window(
+                            features=list(state.rolling),
+                            motion_flags=list(state.motion_flags),
+                            current_live_fps=state.estimated_live_fps,
+                            context_before_sec=float(args.active_span_context_before_sec),
+                            context_after_sec=float(args.active_span_context_after_sec),
+                            min_active_frames=int(args.active_span_min_frames),
+                        )
+                        classifier_input_source_mode = str(active_meta["source_mode"])
+                        if active_window is None:
+                            source_window = np.stack(list(state.rolling)[-live_source_window_frames_current:], axis=0)
+                        else:
+                            source_window = active_window
+                        x_resampled = resample_sequence_fixed_length(
+                            source_window,
+                            target_sequence_length=TARGET_SEQUENCE_LENGTH,
+                        )
+                        x_flat = x_resampled.reshape(1, TARGET_SEQUENCE_LENGTH, FEATURES_PER_FRAME).reshape(1, -1)
+                        raw_probs = model.predict(x_flat, verbose=0)[0].astype(np.float32)
+                        if state.ema_probs is None:
+                            state.ema_probs = raw_probs.copy()
+                        else:
+                            state.ema_probs = (args.smoothing_alpha * state.ema_probs) + (
+                                (1.0 - args.smoothing_alpha) * raw_probs
+                            )
+                        raw_idx = int(np.argmax(raw_probs))
+                        smoothed_idx = int(np.argmax(state.ema_probs))
+                        raw_label = id_to_label.get(raw_idx, f"class_{raw_idx}")
+                        smoothed_label = id_to_label.get(smoothed_idx, f"class_{smoothed_idx}")
+                        state.inference_frames += 1
+                        state.raw_class_counts[raw_label] += 1
+                        state.smoothed_class_counts[smoothed_label] += 1
+                        if raw_label != smoothed_label:
+                            state.raw_smoothed_disagreements[f"{raw_label} -> {smoothed_label}"] += 1
+                        smoothed_top3 = np.argsort(state.ema_probs)[-3:][::-1]
+                        smoothed_top1_idx = int(smoothed_top3[0])
+                        smoothed_top2_idx = int(smoothed_top3[1])
+                        smoothed_top1_label = id_to_label.get(smoothed_top1_idx, f"class_{smoothed_top1_idx}")
+                        smoothed_top2_label = id_to_label.get(smoothed_top2_idx, f"class_{smoothed_top2_idx}")
+                        smoothed_top1_prob = float(state.ema_probs[smoothed_top1_idx])
+                        smoothed_top2_prob = float(state.ema_probs[smoothed_top2_idx])
+                        decision_label, decision_status, top1_margin = decide_action(
+                            top1_label=smoothed_top1_label,
+                            top1_prob=smoothed_top1_prob,
+                            top2_prob=smoothed_top2_prob,
+                            accept_threshold=float(args.accept_threshold),
+                            margin_threshold=float(args.margin_threshold),
+                        )
+                        if (
+                            args.require_motion_for_nonidle
+                            and decision_status == "ACCEPT"
+                            and decision_label not in {"", "idle", "NO_ACTION"}
+                            and not state.motion_active
+                        ):
+                            decision_label = "NO_ACTION"
+                            decision_status = "NO_ACTION"
+                        state.decision_status_counts[decision_status] += 1
+                        state.decision_label_counts[decision_label] += 1
+                        is_valid_accept = decision_status == "ACCEPT" and decision_label not in {"", "idle", "NO_ACTION"}
+                        release_frame = (
+                            decision_status == "NO_ACTION"
+                            or raw_label == "idle"
+                            or smoothed_label == "idle"
+                            or smoothed_top1_prob < args.accept_threshold
+                        )
+                        if state.trigger_locked:
+                            if release_frame:
+                                state.release_counter += 1
+                            else:
+                                state.release_counter = 0
+                            if state.release_counter >= args.release_idle_frames:
+                                state.trigger_locked = False
+                                state.release_counter = 0
+                                state.current_accept_streak = 0
+                                state.current_accept_label = ""
+                        else:
+                            state.release_counter = 0
+                        if is_valid_accept:
+                            if decision_label == state.current_accept_label:
+                                state.current_accept_streak += 1
+                            else:
+                                state.current_accept_label = decision_label
+                                state.current_accept_streak = 1
+                        else:
+                            state.current_accept_label = ""
+                            state.current_accept_streak = 0
+                        final_action_status = "NO_TRIGGER"
+                        final_action_label = ""
+                        if state.current_cooldown_remaining > 0:
+                            state.current_cooldown_remaining -= 1
+                        elif (not state.trigger_locked) and state.current_accept_streak >= args.trigger_streak:
+                            final_action_status = "TRIGGER"
+                            final_action_label = state.current_accept_label
+                            state.total_triggers += 1
+                            state.trigger_lock_was_off_count += 1
+                            state.trigger_counts_by_label[final_action_label] += 1
+                            state.current_cooldown_remaining = args.trigger_cooldown_frames
+                            state.current_accept_streak = 0
+                            state.current_accept_label = ""
+                            state.trigger_locked = True
+                            state.release_counter = 0
+                        state.final_action_status_counts[final_action_status] += 1
+                        state.final_action_label_counts[final_action_label or "NO_ACTION"] += 1
+                        players_payload[side] = {
+                            "tracked": bool(side_tracked),
+                            "person_index": side_person_index,
+                            "raw_label": raw_label,
+                            "smoothed_label": smoothed_label,
+                            "decision_status": decision_status,
+                            "decision_label": decision_label,
+                            "final_action_status": final_action_status,
+                            "final_action_label": final_action_label,
+                            "motion_active": bool(state.motion_active),
+                            "top1_prob": smoothed_top1_prob,
+                        }
+                        writer.writerow(
+                            {
+                                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                "frame_file": frame_path.name,
+                                "player_side": side,
+                                "player_tracked": int(side_tracked),
+                                "buffer_fill": f"{fill}/{live_source_window_frames_current}",
+                                "raw_prediction": raw_label,
+                                "smoothed_prediction": smoothed_label,
+                                "top1_label": smoothed_top1_label,
+                                "top1_prob": smoothed_top1_prob,
+                                "top2_label": smoothed_top2_label,
+                                "top2_prob": smoothed_top2_prob,
+                                "top3_label": "",
+                                "top3_prob": "",
+                                "had_joint_repair": int(frame_result.had_joint_repair),
+                                "repaired_frame": int(frame_result.was_repaired_frame),
+                                "used_prev_frame_copy": int(frame_result.used_prev_frame_copy),
+                                "suspicious_jump": int(frame_result.suspicious_jump),
+                                "missing_joint_count": missing_joints,
+                                "detected_people_count": frame_result.detected_people_count,
+                                "tracking_mode": frame_result.tracking_mode,
+                                "selected_person_index": frame_result.selected_person_index,
+                                "selected_left_person_index": frame_result.selected_left_person_index,
+                                "selected_right_person_index": frame_result.selected_right_person_index,
+                                "tracking_note": frame_result.tracking_note,
+                                "intended_label": intended_label,
+                                "top1_margin": top1_margin,
+                                "smoothed_top1_label": smoothed_top1_label,
+                                "smoothed_top1_prob": smoothed_top1_prob,
+                                "smoothed_top2_label": smoothed_top2_label,
+                                "smoothed_top2_prob": smoothed_top2_prob,
+                                "smoothed_top1_margin": top1_margin,
+                                "decision_source": "smoothed_probs",
+                                "decision_label": decision_label,
+                                "decision_status": decision_status,
+                                "accept_threshold": args.accept_threshold,
+                                "margin_threshold": args.margin_threshold,
+                                "trigger_streak_required": args.trigger_streak,
+                                "current_accept_streak": state.current_accept_streak,
+                                "trigger_cooldown_frames": args.trigger_cooldown_frames,
+                                "current_cooldown_remaining": state.current_cooldown_remaining,
+                                "final_action_status": final_action_status,
+                                "final_action_label": final_action_label,
+                                "trigger_locked": int(state.trigger_locked),
+                                "release_counter": state.release_counter,
+                                "reset_counter": state.release_counter,
+                                "trigger_lock_was_off": "",
+                                "overlay_mode": effective_overlay_mode,
+                                "release_idle_frames": args.release_idle_frames,
+                                "auto_live_fps_enabled": int(args.auto_live_fps),
+                                "estimated_live_fps": state.estimated_live_fps,
+                                "instantaneous_live_fps": "" if state.instantaneous_live_fps is None else state.instantaneous_live_fps,
+                                "live_source_fps": live_source_fps,
+                                "live_source_window_frames": max_source_window_frames,
+                                "live_source_window_frames_current": live_source_window_frames_current,
+                                "motion_score_raw": motion_score_raw,
+                                "motion_score_smoothed": state.motion_score_smoothed,
+                                "motion_active": int(state.motion_active),
+                                "active_span_start_index": active_meta["active_span_start_index"],
+                                "active_span_end_index": active_meta["active_span_end_index"],
+                                "active_span_length_frames": active_meta["active_span_length_frames"],
+                                "classifier_input_source_mode": classifier_input_source_mode,
+                            }
+                        )
+
+                    csv_file.flush()
+                    if effective_overlay_mode in {"terminal", "both"}:
+                        left_payload = players_payload.get("left", build_safe_player_payload(tracked=False, person_index=None))
+                        right_payload = players_payload.get("right", build_safe_player_payload(tracked=False, person_index=None))
+                        print(
+                            f"frame={frame_path.name} | L[{left_payload['person_index']}] tracked={int(left_payload['tracked'])} "
+                            f"raw={left_payload['raw_label']} smooth={left_payload['smoothed_label']} "
+                            f"decision={left_payload['decision_status']}:{left_payload['decision_label']} "
+                            f"trigger={left_payload['final_action_status']}:{left_payload['final_action_label'] or '-'} || "
+                            f"R[{right_payload['person_index']}] tracked={int(right_payload['tracked'])} "
+                            f"raw={right_payload['raw_label']} smooth={right_payload['smoothed_label']} "
+                            f"decision={right_payload['decision_status']}:{right_payload['decision_label']} "
+                            f"trigger={right_payload['final_action_status']}:{right_payload['final_action_label'] or '-'}"
+                        )
+                    output_payload = {
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "frame_file": frame_path.name,
+                        "tracking_mode": args.tracking_mode,
+                        "players": {
+                            "left": players_payload.get("left", build_safe_player_payload(tracked=False, person_index=None)),
+                            "right": players_payload.get("right", build_safe_player_payload(tracked=False, person_index=None)),
+                        },
+                    }
+                    if latest_json_path is not None:
+                        latest_json_path.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
+                    if jsonl_path is not None:
+                        with jsonl_path.open("a", encoding="utf-8") as jsonl_file:
+                            jsonl_file.write(json.dumps(output_payload) + "\n")
+                    continue
+
                 now_ts = time.perf_counter()
                 if args.auto_live_fps:
                     estimated_live_fps, instantaneous_live_fps = update_estimated_live_fps(
@@ -889,6 +1331,8 @@ def main() -> None:
                         {
                             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                             "frame_file": frame_path.name,
+                            "player_side": "single",
+                            "player_tracked": int(frame_result.selected_person_index is not None),
                             "buffer_fill": f"{fill}/{live_source_window_frames_current}",
                             "raw_prediction": "",
                             "smoothed_prediction": "",
@@ -1187,6 +1631,8 @@ def main() -> None:
                     {
                         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                         "frame_file": frame_path.name,
+                        "player_side": "single",
+                        "player_tracked": int(frame_result.selected_person_index is not None),
                         "buffer_fill": f"{fill}/{live_source_window_frames_current}",
                         "raw_prediction": raw_label,
                         "smoothed_prediction": smoothed_label,
@@ -1246,6 +1692,32 @@ def main() -> None:
                         "classifier_input_source_mode": classifier_input_source_mode,
                     }
                 )
+                if latest_json_path is not None or jsonl_path is not None:
+                    output_payload = {
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "frame_file": frame_path.name,
+                        "tracking_mode": args.tracking_mode,
+                        "players": {
+                            "left": {
+                                "tracked": bool(frame_result.selected_person_index is not None),
+                                "person_index": frame_result.selected_person_index,
+                                "raw_label": raw_label,
+                                "smoothed_label": smoothed_label,
+                                "decision_status": decision_status,
+                                "decision_label": decision_label,
+                                "final_action_status": final_action_status,
+                                "final_action_label": final_action_label,
+                                "motion_active": bool(motion_active),
+                                "top1_prob": smoothed_top1_prob,
+                            },
+                            "right": build_safe_player_payload(tracked=False, person_index=None),
+                        },
+                    }
+                    if latest_json_path is not None:
+                        latest_json_path.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
+                    if jsonl_path is not None:
+                        with jsonl_path.open("a", encoding="utf-8") as jsonl_file:
+                            jsonl_file.write(json.dumps(output_payload) + "\n")
                 csv_file.flush()
     except KeyboardInterrupt:
         print("\nStopped by user.")
@@ -1257,6 +1729,25 @@ def main() -> None:
         csv_file.close()
         avg_missing_joints = (missing_joint_sum / total_frames) if total_frames > 0 else 0.0
         avg_estimated_live_fps = (fps_sum / fps_count) if fps_count > 0 else live_source_fps
+        per_player_summary: dict[str, Any] = {}
+        if args.tracking_mode == "two_player_left_right":
+            for side, state in player_states.items():
+                side_avg_fps = (state.fps_sum / state.fps_count) if state.fps_count > 0 else live_source_fps
+                per_player_summary[side] = {
+                    "inference_frames": state.inference_frames,
+                    "raw_prediction_class_counts": dict(state.raw_class_counts),
+                    "smoothed_prediction_class_counts": dict(state.smoothed_class_counts),
+                    "decision_status_counts": dict(state.decision_status_counts),
+                    "decision_label_counts": dict(state.decision_label_counts),
+                    "final_action_status_counts": dict(state.final_action_status_counts),
+                    "final_action_label_counts": dict(state.final_action_label_counts),
+                    "total_triggers": state.total_triggers,
+                    "trigger_counts_by_label": dict(state.trigger_counts_by_label),
+                    "trigger_lock_was_off_count": state.trigger_lock_was_off_count,
+                    "estimated_live_fps_avg": side_avg_fps,
+                    "estimated_live_fps_min": side_avg_fps if state.fps_min_seen is None else state.fps_min_seen,
+                    "estimated_live_fps_max": side_avg_fps if state.fps_max_seen is None else state.fps_max_seen,
+                }
         summary_payload: dict[str, Any] = {
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "tracking_mode": args.tracking_mode,
@@ -1306,6 +1797,7 @@ def main() -> None:
             "active_span_min_frames": int(args.active_span_min_frames),
             "active_span_context_before_sec": float(args.active_span_context_before_sec),
             "active_span_context_after_sec": float(args.active_span_context_after_sec),
+            "players": per_player_summary,
         }
         summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
 

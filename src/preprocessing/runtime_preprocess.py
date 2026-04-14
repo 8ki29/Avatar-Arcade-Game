@@ -58,6 +58,22 @@ class RuntimeFrameResult:
     selected_left_person_index: int | None = None
     selected_right_person_index: int | None = None
     tracking_note: str = ""
+    left_features_30: np.ndarray | None = None
+    right_features_30: np.ndarray | None = None
+    left_tracked: bool = False
+    right_tracked: bool = False
+
+
+@dataclass
+class RuntimeFeatureState:
+    """Per-stream causal normalization/repair state."""
+
+    prev_valid_scale: float | None = None
+    prev_smoothed_scale: float | None = None
+    prev_accepted_raw_xy: np.ndarray | None = None
+    prev_accepted_center: np.ndarray | None = None
+    prev_accepted_usable: np.ndarray | None = None
+    last_processed_frame_xy: np.ndarray | None = None
 
 
 TrackingMode = Literal["single_person", "two_player_left_right"]
@@ -99,14 +115,9 @@ class RuntimePreprocessor:
         self.tracking_mode: TrackingMode = tracking_mode
         self.counterpart_map = self._build_symmetric_counterpart_map()
 
-        self.prev_valid_scale: float | None = None
-        self.prev_smoothed_scale: float | None = None
-
-        self.prev_accepted_raw_xy: np.ndarray | None = None
-        self.prev_accepted_center: np.ndarray | None = None
-        self.prev_accepted_usable: np.ndarray | None = None
-
-        self.last_processed_frame_xy: np.ndarray | None = None
+        self.single_feature_state = RuntimeFeatureState()
+        self.left_feature_state = RuntimeFeatureState()
+        self.right_feature_state = RuntimeFeatureState()
         self.single_track = TrackedPersonState()
         self.left_track = TrackedPersonState()
         self.right_track = TrackedPersonState()
@@ -167,15 +178,16 @@ class RuntimePreprocessor:
 
     def _is_suspicious_frame(
         self,
+        feature_state: RuntimeFeatureState,
         current_xy: np.ndarray,
         current_center: np.ndarray,
         current_scale: float,
         current_usable: np.ndarray,
     ) -> bool:
         if (
-            self.prev_accepted_raw_xy is None
-            or self.prev_accepted_center is None
-            or self.prev_accepted_usable is None
+            feature_state.prev_accepted_raw_xy is None
+            or feature_state.prev_accepted_center is None
+            or feature_state.prev_accepted_usable is None
             or current_scale <= 0
         ):
             return False
@@ -185,15 +197,15 @@ class RuntimePreprocessor:
 
         moved_count = 0
         for idx in STABLE_JOINTS:
-            if current_usable[idx] and self.prev_accepted_usable[idx]:
-                jump_dist = float(np.linalg.norm(current_xy[idx] - self.prev_accepted_raw_xy[idx]))
+            if current_usable[idx] and feature_state.prev_accepted_usable[idx]:
+                jump_dist = float(np.linalg.norm(current_xy[idx] - feature_state.prev_accepted_raw_xy[idx]))
                 if jump_dist > jump_threshold:
                     moved_count += 1
 
         if moved_count >= MULTI_JOINT_MIN_COUNT:
             return True
 
-        center_jump = float(np.linalg.norm(current_center - self.prev_accepted_center))
+        center_jump = float(np.linalg.norm(current_center - feature_state.prev_accepted_center))
         return center_jump > center_threshold
 
     def _parse_people(self, frame_data: dict[str, Any]) -> list[ParsedPersonCandidate]:
@@ -327,6 +339,7 @@ class RuntimePreprocessor:
 
     def _repair_missing_joints(
         self,
+        feature_state: RuntimeFeatureState,
         normalized_xy: np.ndarray,
         usable_mask: np.ndarray,
     ) -> tuple[np.ndarray, int]:
@@ -339,8 +352,8 @@ class RuntimePreprocessor:
             missing_count += 1
 
             # 1) previous valid joint value
-            if self.last_processed_frame_xy is not None:
-                repaired[joint_idx] = self.last_processed_frame_xy[joint_idx]
+            if feature_state.last_processed_frame_xy is not None:
+                repaired[joint_idx] = feature_state.last_processed_frame_xy[joint_idx]
                 continue
 
             # 2) symmetric counterpart mirror if possible
@@ -355,10 +368,76 @@ class RuntimePreprocessor:
 
         return repaired, missing_count
 
-    def _copy_last_processed(self) -> np.ndarray:
-        if self.last_processed_frame_xy is None:
+    def _copy_last_processed(self, feature_state: RuntimeFeatureState) -> np.ndarray:
+        if feature_state.last_processed_frame_xy is None:
             return np.zeros((NUM_JOINTS, 2), dtype=np.float32)
-        return self.last_processed_frame_xy.copy()
+        return feature_state.last_processed_frame_xy.copy()
+
+    def _process_candidate_to_features(
+        self,
+        *,
+        candidate: ParsedPersonCandidate | None,
+        feature_state: RuntimeFeatureState,
+    ) -> tuple[np.ndarray, bool, bool, bool, int]:
+        xy = None if candidate is None else candidate.xy
+        usable_mask = None if candidate is None else candidate.usable_mask
+
+        if xy is None or usable_mask is None:
+            copied = self._copy_last_processed(feature_state)
+            return copied.reshape(FEATURES_PER_FRAME).astype(np.float32), True, False, False, NUM_JOINTS
+
+        center = self._choose_center(xy, usable_mask)
+        if center is None:
+            copied = self._copy_last_processed(feature_state)
+            return copied.reshape(FEATURES_PER_FRAME).astype(np.float32), True, False, False, NUM_JOINTS
+
+        computed_scale = self._compute_weighted_scale(xy, usable_mask)
+        if computed_scale is None:
+            current_scale = (
+                feature_state.prev_valid_scale
+                if feature_state.prev_valid_scale is not None
+                else SAFE_FALLBACK_SCALE
+            )
+        else:
+            current_scale = computed_scale
+        current_scale = max(float(current_scale), MIN_SCALE_EPS)
+
+        suspicious = self._is_suspicious_frame(
+            feature_state=feature_state,
+            current_xy=xy,
+            current_center=center,
+            current_scale=current_scale,
+            current_usable=usable_mask,
+        )
+        if suspicious:
+            copied = self._copy_last_processed(feature_state)
+            return copied.reshape(FEATURES_PER_FRAME).astype(np.float32), True, False, True, NUM_JOINTS
+
+        if feature_state.prev_smoothed_scale is None:
+            smoothed_scale = current_scale
+        else:
+            smoothed_scale = (
+                SCALE_SMOOTH_ALPHA_OLD * feature_state.prev_smoothed_scale
+                + SCALE_SMOOTH_ALPHA_NEW * current_scale
+            )
+        smoothed_scale = max(float(smoothed_scale), MIN_SCALE_EPS)
+
+        normalized = (xy - center[None, :]) / smoothed_scale
+        repaired, missing_joint_count = self._repair_missing_joints(feature_state, normalized, usable_mask)
+
+        feature_state.prev_valid_scale = current_scale
+        feature_state.prev_smoothed_scale = smoothed_scale
+        feature_state.prev_accepted_raw_xy = xy
+        feature_state.prev_accepted_center = center
+        feature_state.prev_accepted_usable = usable_mask
+        feature_state.last_processed_frame_xy = repaired.copy()
+        return (
+            repaired.reshape(FEATURES_PER_FRAME).astype(np.float32),
+            missing_joint_count > 0,
+            missing_joint_count > 0,
+            False,
+            missing_joint_count,
+        )
 
     def process_json_path(self, frame_json_path: Path) -> RuntimeFrameResult:
         """Process one OpenPose JSON file into a normalized 30-d frame."""
@@ -394,98 +473,37 @@ class RuntimePreprocessor:
                 selected_person_index = selected_candidate.person_index
                 selected_left_person_index = selected_candidate.person_index
 
-        xy = None if selected_candidate is None else selected_candidate.xy
-        usable_mask = None if selected_candidate is None else selected_candidate.usable_mask
-
-        # Whole-frame failure -> causal copy-forward fallback.
-        if xy is None or usable_mask is None:
-            copied = self._copy_last_processed()
-            features = copied.reshape(FEATURES_PER_FRAME).astype(np.float32)
-            return RuntimeFrameResult(
-                features_30=features,
-                was_repaired_frame=True,
-                had_joint_repair=False,
-                suspicious_jump=False,
-                used_prev_frame_copy=True,
-                missing_joint_count=NUM_JOINTS,
-                tracking_mode=self.tracking_mode,
-                detected_people_count=detected_people_count,
-                selected_person_index=selected_person_index,
-                selected_left_person_index=selected_left_person_index,
-                selected_right_person_index=selected_right_person_index,
-                tracking_note=f"{tracking_note}|frame_copy_no_selection",
+        if self.tracking_mode == "two_player_left_right":
+            left_features, left_rep, left_joint_rep, left_susp, left_missing = self._process_candidate_to_features(
+                candidate=selected_left_candidate,
+                feature_state=self.left_feature_state,
             )
-
-        center = self._choose_center(xy, usable_mask)
-        if center is None:
-            copied = self._copy_last_processed()
-            features = copied.reshape(FEATURES_PER_FRAME).astype(np.float32)
-            return RuntimeFrameResult(
-                features_30=features,
-                was_repaired_frame=True,
-                had_joint_repair=False,
-                suspicious_jump=False,
-                used_prev_frame_copy=True,
-                missing_joint_count=NUM_JOINTS,
-                tracking_mode=self.tracking_mode,
-                detected_people_count=detected_people_count,
-                selected_person_index=selected_person_index,
-                selected_left_person_index=selected_left_person_index,
-                selected_right_person_index=selected_right_person_index,
-                tracking_note=f"{tracking_note}|frame_copy_no_center",
+            right_features, right_rep, right_joint_rep, right_susp, right_missing = self._process_candidate_to_features(
+                candidate=selected_right_candidate,
+                feature_state=self.right_feature_state,
             )
-
-        computed_scale = self._compute_weighted_scale(xy, usable_mask)
-        if computed_scale is None:
-            current_scale = self.prev_valid_scale if self.prev_valid_scale is not None else SAFE_FALLBACK_SCALE
+            if selected_candidate is selected_right_candidate:
+                features_30 = right_features
+                was_repaired_frame = right_rep
+                had_joint_repair = right_joint_rep
+                suspicious_jump = right_susp
+                missing_joint_count = right_missing
+            else:
+                features_30 = left_features
+                was_repaired_frame = left_rep
+                had_joint_repair = left_joint_rep
+                suspicious_jump = left_susp
+                missing_joint_count = left_missing
         else:
-            current_scale = computed_scale
-
-        current_scale = max(float(current_scale), MIN_SCALE_EPS)
-
-        suspicious = self._is_suspicious_frame(
-            current_xy=xy,
-            current_center=center,
-            current_scale=current_scale,
-            current_usable=usable_mask,
-        )
-        if suspicious:
-            copied = self._copy_last_processed()
-            features = copied.reshape(FEATURES_PER_FRAME).astype(np.float32)
-            return RuntimeFrameResult(
-                features_30=features,
-                was_repaired_frame=True,
-                had_joint_repair=False,
-                suspicious_jump=True,
-                used_prev_frame_copy=True,
-                missing_joint_count=NUM_JOINTS,
-                tracking_mode=self.tracking_mode,
-                detected_people_count=detected_people_count,
-                selected_person_index=selected_person_index,
-                selected_left_person_index=selected_left_person_index,
-                selected_right_person_index=selected_right_person_index,
-                tracking_note=f"{tracking_note}|frame_copy_suspicious",
+            features_30, was_repaired_frame, had_joint_repair, suspicious_jump, missing_joint_count = (
+                self._process_candidate_to_features(
+                    candidate=selected_candidate,
+                    feature_state=self.single_feature_state,
+                )
             )
+            left_features = features_30
+            right_features = None
 
-        if self.prev_smoothed_scale is None:
-            smoothed_scale = current_scale
-        else:
-            smoothed_scale = (
-                SCALE_SMOOTH_ALPHA_OLD * self.prev_smoothed_scale
-                + SCALE_SMOOTH_ALPHA_NEW * current_scale
-            )
-        smoothed_scale = max(float(smoothed_scale), MIN_SCALE_EPS)
-
-        normalized = (xy - center[None, :]) / smoothed_scale
-        repaired, missing_joint_count = self._repair_missing_joints(normalized, usable_mask)
-
-        # Update accepted-frame state only after a non-suspicious parse.
-        self.prev_valid_scale = current_scale
-        self.prev_smoothed_scale = smoothed_scale
-        self.prev_accepted_raw_xy = xy
-        self.prev_accepted_center = center
-        self.prev_accepted_usable = usable_mask
-        self.last_processed_frame_xy = repaired.copy()
         if self.tracking_mode == "two_player_left_right":
             if selected_left_candidate is not None:
                 self._update_track_state(self.left_track, selected_left_candidate)
@@ -495,11 +513,11 @@ class RuntimePreprocessor:
             self._update_track_state(self.single_track, selected_candidate)
 
         return RuntimeFrameResult(
-            features_30=repaired.reshape(FEATURES_PER_FRAME).astype(np.float32),
-            was_repaired_frame=missing_joint_count > 0,
-            had_joint_repair=missing_joint_count > 0,
-            suspicious_jump=False,
-            used_prev_frame_copy=False,
+            features_30=features_30,
+            was_repaired_frame=was_repaired_frame,
+            had_joint_repair=had_joint_repair,
+            suspicious_jump=suspicious_jump,
+            used_prev_frame_copy=was_repaired_frame and not had_joint_repair,
             missing_joint_count=missing_joint_count,
             tracking_mode=self.tracking_mode,
             detected_people_count=detected_people_count,
@@ -507,4 +525,8 @@ class RuntimePreprocessor:
             selected_left_person_index=selected_left_person_index,
             selected_right_person_index=selected_right_person_index,
             tracking_note=tracking_note,
+            left_features_30=left_features,
+            right_features_30=right_features,
+            left_tracked=selected_left_candidate is not None,
+            right_tracked=selected_right_candidate is not None,
         )
