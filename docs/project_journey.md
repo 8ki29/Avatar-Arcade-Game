@@ -696,3 +696,86 @@ This preserves full debug visibility while making output behavior much closer to
 - Faster, clearer live iteration in local Windows testing.
 - More game-realistic action semantics (`one hold = one trigger`) with explicit release/reset behavior.
 - Better diagnostics in CSV/summary for tuning thresholds and validating lock behavior before gameplay bridge work.
+
+## Idle dataset balancing update: controlled expansion + workflow clarification
+
+### What was observed
+
+Recent live-debug behavior still shows false-positive firing during long neutral periods, with drift frequently landing on `defense_earth` and sometimes `attack_earth`.
+This reopened the idle-data question, but with an important caution: adding idle blindly could create class imbalance and over-bias the classifier toward idle.
+
+### Current dataset context
+
+The current working dataset remains 51 samples per class across the 9-class schema.
+Given that baseline balance, the immediate plan is to add approximately 20 to 30 new idle takes first, retrain, and reevaluate before deciding on further expansion.
+If additional idle is still needed, it will be added in a second controlled step rather than through one large batch.
+
+### What was changed in our data-collection conclusion
+
+The practical conclusion is not to avoid idle expansion, but to do it deliberately:
+
+- add idle in controlled increments,
+- prioritize realistic, challenging idle behavior,
+- avoid making idle disproportionately larger than gesture classes.
+
+This keeps class balance scientifically defensible while directly targeting the live failure mode.
+
+### Why it matters
+
+`idle` is a real gameplay class, not a placeholder.
+In final gameplay terms, no-action behavior is safer than confidently hallucinating a gesture while a player is simply waiting.
+Therefore, idle recognition quality is a high-priority reliability objective.
+
+The most valuable new examples are "hard idle" cases, not perfectly frozen posture:
+
+- natural standing,
+- subtle sway,
+- weight shifts,
+- slight arm-position variation,
+- natural waiting behavior,
+- return-to-neutral transitions after movement,
+- and other neutral states that previously produced false positives.
+
+### Correction to idle capture workflow understanding
+
+There was a short period of confusion where idle capture was described as a manual temporary-folder process.
+After re-checking repository history and docs, we confirmed that the intended workflow already exists and should be used directly:
+
+- `tools/record_idle_pose.bat`
+- `tools/record_idle_pose_continuous.ps1`
+
+That helper path already writes takes into the dataset schema at:
+
+- `data/raw/openpose_json/idle/<person>/<session>/<take_###>/`
+
+So, when using the intended helper workflow, manual file moving is not required.
+
+### Important technical clarification on take length
+
+A key correction is capture semantics.
+We had loosely framed idle helper behavior as recording "the first 3 seconds," but the script behavior is frame-count based:
+
+- default capture is exactly 90 new JSON frames per idle take,
+- not a strict wall-clock 3-second timer.
+
+As a result, real take duration depends on effective OpenPose FPS.
+On this machine, practical behavior often appears closer to roughly 15 FPS, so 90 frames can be closer to about 6 seconds than 3 seconds.
+This distinction matters for future cross-session comparison and interpretation of idle windows.
+
+### Current practical workflow conclusion
+
+The current safe collection loop is:
+
+1. launch the idle helper,
+2. keep OpenPose running continuously,
+3. press ENTER to capture one new idle take at a time,
+4. type `q` to quit,
+5. then rerun preprocessing and retrain after enough new takes are collected.
+
+This is more consistent and lower-risk than ad hoc manual copying.
+
+### Current takeaway
+
+The next dataset-improvement step is controlled idle expansion before rerunning the MLP baseline.
+The objective is specific: reduce false-positive gesture firing during neutral standing and long idle periods in live use.
+This is a data-refinement phase, not a model-architecture replacement phase.
