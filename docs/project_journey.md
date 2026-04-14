@@ -1031,3 +1031,26 @@ Before another architecture change, tighten live temporal alignment to observed 
 ### Current takeaway
 
 - Before changing architecture again, make live temporal behavior mirror training’s contiguous active-span logic as closely as possible.
+
+## Final integration bridge: true dual-player live classifier output
+
+Single-player live behavior reached a point where confidence-gated output is practically usable for gameplay prototyping, which reduced the core model-risk on the ML side.
+
+The remaining blocker was integration-facing rather than architecture-facing: in two-player live mode, the runtime was still effectively operating as a single selected stream instead of two side-consistent classifier streams.
+
+This step closes that gap by implementing true dual-stream live inference for `two_player_left_right` mode:
+
+- left and right players are classified independently,
+- side identity is preserved by left/right mapping,
+- each side keeps independent causal state (buffer, motion, smoothing, decision, trigger/cooldown/lock),
+- and Unity-friendly JSON outputs were added for direct consumption.
+
+Why this matters:
+
+- it is the final bridge from ML prototype behavior to game-loop integration,
+- it keeps runtime semantics aligned with two-player gameplay expectations,
+- and it removes ad-hoc glue requirements on the Unity side.
+
+Current takeaway:
+
+- the model pipeline is now packaged in a side-stable, runtime-ready output format that Unity can poll directly (`latest_prediction.json`) for both players.

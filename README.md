@@ -245,6 +245,65 @@ python -m src.inference.live_openpose_debug \
   --trigger-cooldown-frames 15
 ```
 
+### True two-player live mode (Unity-ready JSON output)
+
+Use `--tracking-mode two_player_left_right` to keep **left** and **right** players as independent live streams.
+Each side has its own causal buffer, motion state, EMA smoothing, decision gate, and trigger/cooldown state.
+
+Recommended Unity path:
+
+1. Run live classifier with `--output-latest-json`.
+2. In Unity, poll that file (for example `latest_prediction.json`) each update tick.
+3. Read `players.left` and `players.right` fields directly.
+
+Example:
+
+```bash
+python -m src.inference.live_openpose_debug \
+  --json-dir data/raw/live_buffer/openpose_session/live_test \
+  --model-path models/checkpoints/best_mlp.keras \
+  --tracking-mode two_player_left_right \
+  --output-latest-json logs/inference/latest_prediction.json \
+  --output-jsonl logs/inference/live_predictions.jsonl \
+  --overlay-mode terminal
+```
+
+JSON shape (latest + JSONL rows):
+
+```json
+{
+  "timestamp_utc": "2026-04-14T12:34:56.789012+00:00",
+  "frame_file": "frame_000001_keypoints.json",
+  "tracking_mode": "two_player_left_right",
+  "players": {
+    "left": {
+      "tracked": true,
+      "person_index": 0,
+      "raw_label": "attack_fire",
+      "smoothed_label": "attack_fire",
+      "decision_status": "ACCEPT",
+      "decision_label": "attack_fire",
+      "final_action_status": "TRIGGER",
+      "final_action_label": "attack_fire",
+      "motion_active": true,
+      "top1_prob": 0.91
+    },
+    "right": {
+      "tracked": false,
+      "person_index": null,
+      "raw_label": "idle",
+      "smoothed_label": "idle",
+      "decision_status": "NO_ACTION",
+      "decision_label": "NO_ACTION",
+      "final_action_status": "NO_TRIGGER",
+      "final_action_label": "",
+      "motion_active": false,
+      "top1_prob": 0.0
+    }
+  }
+}
+```
+
 Window HUD example:
 
 ```bash
