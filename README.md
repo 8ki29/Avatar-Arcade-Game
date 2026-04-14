@@ -482,3 +482,55 @@ Outputs are saved to:
 - `<run-dir>/recollection_plan/priority_review_takes.csv`
 - `<run-dir>/recollection_plan/priority_recollect_targets.csv`
 - optional `<run-dir>/recollection_plan/boundary_priority_bar.png`
+
+## Semi-automatic gesture active-range annotation (new)
+
+Current 90-frame takes often include idle/transition frames before and after the core gesture. This can dilute the gesture signal and contribute to unstable live timing around onset/offset.
+
+To support cleaner future windowing/dataset refinement, a lightweight annotation tool now proposes the active gesture span inside each take:
+
+- `active_start_frame`
+- `active_end_frame`
+
+Run examples:
+
+```bash
+# One take, accept automatic proposal
+python -m src.analysis.propose_gesture_segments \
+  --take-dir data/raw/openpose_json/attack_air/luis/s01/take_001 \
+  --accept-auto --save-plots
+
+# One gesture folder (interactive review)
+python -m src.analysis.propose_gesture_segments \
+  --gesture attack_air --interactive --save-plots
+
+# Entire dataset (skip already labeled takes unless --overwrite)
+python -m src.analysis.propose_gesture_segments --all --accept-auto
+```
+
+What the tool does:
+
+- reads OpenPose frames in temporal order
+- uses the same upper-body BODY_25 joint subset used by preprocessing
+- computes per-frame motion energy from consecutive-frame joint deltas
+- smooths motion, thresholds it, and proposes first/last significant active frames
+- optionally prompts for manual correction (or accepts manual CLI overrides)
+
+Where labels are saved:
+
+- Central CSV manifest (default):
+  - `data/raw/openpose_json/active_gesture_ranges.csv`
+
+Each manifest row contains:
+
+- `gesture`, `person`, `session`, `take`, `take_path`
+- `active_start_frame`, `active_end_frame`
+- `proposal_method`
+- `label_status` (`auto_accepted`, `manual_adjusted`, or `manual_override`)
+
+Notes:
+
+- This is annotation/refinement infrastructure only in this step.
+- It does **not** change model architecture.
+- It does **not** retrain automatically.
+- Future preprocessing/training integration can consume this manifest explicitly in a later task.
