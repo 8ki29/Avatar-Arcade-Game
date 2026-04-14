@@ -843,3 +843,52 @@ It also gives a cleaner foundation for subsequent threshold/model tuning by remo
 ### Current takeaway
 
 Align preprocessing first, then reevaluate live performance before changing architecture again.
+
+## Semi-automatic active-range annotation foundation (motion-energy proposal + human review)
+
+### Live performance after preprocessing unification
+
+After aligning training dataset build with runtime-causal preprocessing and retraining, live behavior improved compared with the earlier mismatched pipeline.
+This confirmed that train/live preprocessing mismatch had been a real contributor to poor live behavior.
+
+### Remaining problem after that improvement
+
+Even with this improvement, live behavior is still not clean enough for gameplay reliability.
+In many runs, the intended class appears during the gesture itself, but neighboring transition frames can still produce nearby wrong classes and unstable timing.
+
+This suggests a remaining issue is not only model quality, but also sample composition: each fixed 90-frame take mixes idle-before, gesture-active, and idle-after content.
+
+### New conclusion
+
+A practical next step is to describe where the gesture is actually active inside each take.
+This does **not** yet require full per-frame 9-class relabeling.
+The smallest useful step is to annotate only the active start/end span for each take.
+
+### What is being implemented now
+
+A semi-automatic annotation workflow is added to propose active gesture ranges from pose-change motion energy.
+For each take, the tool proposes:
+
+- `active_start_frame`
+- `active_end_frame`
+
+Then the user can either:
+
+- accept the automatic proposal, or
+- correct start/end manually (interactive prompt or CLI override flags).
+
+The output is a persistent central manifest of active-range labels per take.
+
+### Why this matters
+
+This creates a concrete foundation for future dataset refinement without forcing immediate architecture changes:
+
+- better-centered training windows,
+- reduced idle/transition contamination in gesture samples,
+- more realistic analysis of gesture onset/offset timing.
+
+It is a lower-risk next step than jumping directly into another model redesign.
+
+### Current takeaway
+
+Before another major model change, improve the data description of **when** gesture activity occurs inside each take.
