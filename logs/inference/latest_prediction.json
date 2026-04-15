@@ -1,0 +1,31 @@
+{
+  "timestamp_utc": "2026-04-15T01:15:26.939982+00:00",
+  "frame_file": "000000005333_keypoints.json",
+  "tracking_mode": "two_player_left_right",
+  "players": {
+    "left": {
+      "tracked": false,
+      "person_index": null,
+      "raw_label": "attack_earth",
+      "smoothed_label": "attack_earth",
+      "decision_status": "NO_ACTION",
+      "decision_label": "NO_ACTION",
+      "final_action_status": "NO_TRIGGER",
+      "final_action_label": "",
+      "motion_active": false,
+      "top1_prob": 0.9950968623161316
+    },
+    "right": {
+      "tracked": true,
+      "person_index": 0,
+      "raw_label": "attack_earth",
+      "smoothed_label": "attack_earth",
+      "decision_status": "NO_ACTION",
+      "decision_label": "NO_ACTION",
+      "final_action_status": "NO_TRIGGER",
+      "final_action_label": "",
+      "motion_active": true,
+      "top1_prob": 0.7854163646697998
+    }
+  }
+}

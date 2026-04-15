@@ -1,0 +1,143 @@
+{
+  "timestamp_utc": "2026-04-15T01:02:15.046824+00:00",
+  "tracking_mode": "two_player_left_right",
+  "intended_label": "",
+  "total_frames_processed": 7607,
+  "warmup_frames": 70,
+  "inference_frames": 0,
+  "frames_with_joint_repair": 6438,
+  "frames_with_prev_frame_copy": 0,
+  "frames_flagged_suspicious_jump": 0,
+  "missing_joints": {
+    "average": 4.673327198632838,
+    "min": 0,
+    "max": 12
+  },
+  "raw_prediction_class_counts": {},
+  "smoothed_prediction_class_counts": {},
+  "raw_to_smoothed_disagreements_top10": {},
+  "decision_status_counts": {},
+  "decision_label_counts": {},
+  "final_action_status_counts": {},
+  "final_action_label_counts": {},
+  "total_triggers": 0,
+  "trigger_counts_by_label": {},
+  "trigger_lock_was_off_count": 0,
+  "overlay_mode": "window",
+  "trigger_locked_final": false,
+  "release_counter_final": 0,
+  "reset_counter_final": 0,
+  "accept_threshold": 0.8,
+  "margin_threshold": 0.2,
+  "trigger_streak_required": 3,
+  "trigger_cooldown_frames": 15,
+  "release_idle_frames": 3,
+  "trigger_lock_enabled": true,
+  "target_fps": 10.0,
+  "target_sequence_length": 24,
+  "live_source_fps": 11.0,
+  "auto_live_fps_enabled": true,
+  "estimated_live_fps_avg": 11.0,
+  "estimated_live_fps_min": 11.0,
+  "estimated_live_fps_max": 11.0,
+  "live_source_window_frames": 36,
+  "require_motion_for_nonidle": true,
+  "motion_threshold_on": 0.03,
+  "motion_threshold_off": 0.022,
+  "active_span_min_frames": 4,
+  "active_span_context_before_sec": 0.25,
+  "active_span_context_after_sec": 0.1,
+  "players": {
+    "left": {
+      "inference_frames": 7571,
+      "raw_prediction_class_counts": {
+        "attack_earth": 7558,
+        "idle": 10,
+        "defense_earth": 3
+      },
+      "smoothed_prediction_class_counts": {
+        "attack_earth": 7567,
+        "idle": 3,
+        "defense_earth": 1
+      },
+      "decision_status_counts": {
+        "ACCEPT": 4051,
+        "NO_ACTION": 3520
+      },
+      "decision_label_counts": {
+        "attack_earth": 4051,
+        "NO_ACTION": 3520
+      },
+      "final_action_status_counts": {
+        "NO_TRIGGER": 7470,
+        "TRIGGER": 101
+      },
+      "final_action_label_counts": {
+        "NO_ACTION": 7470,
+        "attack_earth": 101
+      },
+      "total_triggers": 101,
+      "trigger_counts_by_label": {
+        "attack_earth": 101
+      },
+      "trigger_lock_was_off_count": 101,
+      "estimated_live_fps_avg": 8.779426940222416,
+      "estimated_live_fps_min": 6.328492187547468,
+      "estimated_live_fps_max": 14.899873779800272
+    },
+    "right": {
+      "inference_frames": 7571,
+      "raw_prediction_class_counts": {
+        "attack_water": 1315,
+        "idle": 5016,
+        "defense_earth": 73,
+        "defense_air": 11,
+        "attack_earth": 866,
+        "defense_water": 88,
+        "defense_fire": 202
+      },
+      "smoothed_prediction_class_counts": {
+        "attack_water": 1325,
+        "idle": 5049,
+        "defense_earth": 67,
+        "defense_air": 6,
+        "attack_earth": 831,
+        "defense_water": 88,
+        "defense_fire": 205
+      },
+      "decision_status_counts": {
+        "NO_ACTION": 7527,
+        "ACCEPT": 44
+      },
+      "decision_label_counts": {
+        "NO_ACTION": 7527,
+        "attack_water": 20,
+        "defense_earth": 7,
+        "defense_fire": 12,
+        "defense_water": 5
+      },
+      "final_action_status_counts": {
+        "NO_TRIGGER": 7562,
+        "TRIGGER": 9
+      },
+      "final_action_label_counts": {
+        "NO_ACTION": 7562,
+        "attack_water": 3,
+        "defense_earth": 1,
+        "defense_fire": 4,
+        "defense_water": 1
+      },
+      "total_triggers": 9,
+      "trigger_counts_by_label": {
+        "attack_water": 3,
+        "defense_earth": 1,
+        "defense_fire": 4,
+        "defense_water": 1
+      },
+      "trigger_lock_was_off_count": 9,
+      "estimated_live_fps_avg": 8.778564575450035,
+      "estimated_live_fps_min": 6.329355899496381,
+      "estimated_live_fps_max": 14.888748644222524
+    }
+  }
+}
